@@ -70,125 +70,122 @@ OPENROUTER_API_KEY=your_actual_key
 
 ---
 
-## Step 4: Start Evolution API (WhatsApp Gateway)
+## Step 4: Start Evolution API & Database
 
 ```bash
-# Start only the Evolution API container first
-docker-compose up -d evolution-api
+# Start PostgreSQL and Evolution API containers
+docker-compose up -d evolution-postgres evolution-api
 
-# Check it's running
-docker-compose logs evolution-api
+# Check that containers are healthy
+docker-compose ps
 ```
 
-Evolution API should be accessible at `http://localhost:8080`.
+Evolution API will be accessible at `http://localhost:8080`.
 
 ---
 
 ## Step 5: Connect WhatsApp
 
-### Option A: Via the Python Backend (recommended)
-```bash
-# Start the Python backend
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-
-# The backend auto-creates the instance and configures webhooks on startup
-# Check the QR code at:
-curl http://localhost:8080/instance/connect/college-bot -H "apikey: my_secure_bot_key_2026"
-```
-
-### Option B: Manual Instance Setup
-```bash
-# 1. Create instance
-curl -X POST http://localhost:8080/instance/create \
-  -H "Content-Type: application/json" \
-  -H "apikey: my_secure_bot_key_2026" \
-  -d '{"instanceName": "college-bot", "integration": "WHATSAPP-BAILEYS", "qrcode": true}'
-
-# 2. Get QR code (scan with WhatsApp → Linked Devices → Link a Device)
-curl http://localhost:8080/instance/connect/college-bot \
-  -H "apikey: my_secure_bot_key_2026"
-
-# 3. Check connection
-curl http://localhost:8080/instance/connectionState/college-bot \
-  -H "apikey: my_secure_bot_key_2026"
-```
-
-Scan the QR code using WhatsApp on your phone:
-1. Open WhatsApp → ⋮ Menu → **Linked Devices**
-2. Tap **Link a Device**
-3. Scan the QR code
+### Easy Browser Pairing (Recommended)
+1. Start the Python backend:
+   ```bash
+   docker-compose up -d python-backend
+   ```
+2. Open your browser to **[http://localhost:8000/qr](http://localhost:8000/qr)** (or check `qr_code.png` in the repo).
+3. On your phone:
+   - Open WhatsApp &rarr; **Settings** (or **⋮ Menu**) &rarr; **Linked Devices**
+   - Tap **Link a Device**
+   - Point your camera at the QR code on your screen.
+4. As soon as you scan, the interface will automatically switch to **✅ WhatsApp Connected!**
+   - You can also verify by visiting `http://localhost:8000/health`.
+   - If the code expires, click the **"🔄 Get Fresh QR Code"** button.
 
 ---
 
-## Step 6: Set Up Google Calendar (Optional)
+## Step 6: Set Up Google Calendar
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (e.g., "College Assistant")
-3. Enable the **Google Calendar API**
-4. Go to **APIs & Services → Credentials**
-5. Create **OAuth 2.0 Client ID** (type: Desktop app)
-6. Download the JSON → save as `credentials.json` in the project root
-7. On first run, a browser window will open for authorization
-8. After authorizing, `token.json` is saved automatically
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a new project (e.g., "College Assistant").
+3. Enable the **Google Calendar API**.
+4. Go to **APIs & Services → Credentials**:
+   - Click **Create Credentials** &rarr; **OAuth client ID**.
+   - Application type: **Desktop app**.
+   - Download the JSON file and rename it to `credentials.json` in your project root.
+5. Generate your OAuth token:
+   ```bash
+   # Run the calendar authorization helper
+   python setup_calendar.py
+   ```
+   A browser window will open asking you to sign in with your Google Account and grant Calendar access. This creates `token.json`.
+6. *(Important)* **Multi-User Shared Calendar (Option 1)**:
+   - Create a secondary calendar in Google Calendar (e.g. "College Exams & Labs").
+   - Under **Settings and sharing** for that calendar, copy its **Calendar ID** (e.g. `xyz...@group.calendar.google.com`).
+   - Add it to your `.env`:
+     ```bash
+     GOOGLE_CALENDAR_ID=xyz...@group.calendar.google.com
+     ```
+   - Share the public or view link with your students so everyone sees the updates automatically!
+7. **Security Note**:
+   - `credentials.json` and `token.json` contain sensitive OAuth secrets and are permanently excluded by `.gitignore`. **Never commit them to GitHub.**
 
 ---
 
-## Step 7: Find Your Announcement Group JID
+## Step 7: Configure Announcement Group & Webhook
 
-After connecting WhatsApp, find your announcement group's JID:
+After connecting WhatsApp, list the groups your bot has joined:
 
 ```bash
-# List all groups
 curl http://localhost:8000/groups
 ```
 
-Copy the `jid` of your announcement group and add it to `.env`:
+Copy the `jid` of your target announcement group and set it in `.env`:
 ```
-ANNOUNCEMENT_GROUP_JID=120363012345678@g.us
+ANNOUNCEMENT_GROUP_JID=120363410586240165@g.us
+```
+
+Whenever `.env` is modified, reload the backend:
+```bash
+docker-compose up -d python-backend
 ```
 
 ---
 
-## Step 8: Run Everything
+## Step 8: Verification & Bot Commands
 
+### System Health
 ```bash
-# Option A: Docker (both services)
-docker-compose up -d
-
-# Option B: Local development
-# Terminal 1: Evolution API
-docker-compose up -d evolution-api
-
-# Terminal 2: Python backend (with auto-reload)
-uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+curl http://localhost:8000/health
 ```
 
-### Verify It Works
-
+### Direct Query (Test without WhatsApp)
 ```bash
-# Health check
-curl http://localhost:8000/health
-
-# Test direct query (without WhatsApp)
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is polymorphism in OOP?"}'
+  -d "{\"question\": \"What is polymorphism in OOP?\"}"
+```
 
-# Check schedule
+### Schedule Verification
+```bash
 curl http://localhost:8000/schedule
 ```
 
-Then send a message to the linked WhatsApp number — you should get an AI response! 🎉
+### WhatsApp Commands
+| Action | Message / Command | Description |
+|:-------|:------------------|:------------|
+| **View Schedule** | `/schedule` or `جدول` | Returns upcoming exams/labs from the shared calendar |
+| **Delete Single Event** | `/delete [Subject]` or `احذف امتحان [المادة]` | Removes matching event from calendar (bilingual matching) |
+| **Bulk Delete** | `delete all exam schedule` or `احذف كل الامتحانات` | Clears all events in the semester window |
+| **Add Timetable Image** | Send photo of timetable (DM or Group) | AI parses subjects, dates, and times and syncs to Google Calendar |
+| **Ask Question** | Send any study question or photo | Generates an AI answer with citations |
 
 ---
 
 ## Troubleshooting
 
-| Issue | Solution |
-|:------|:---------|
-| Evolution API not starting | Check Docker is running: `docker ps` |
-| QR code expired | Restart Evolution API: `docker-compose restart evolution-api` |
-| WhatsApp disconnected | Re-scan QR code via `/instance/connect` endpoint |
-| Gemini API error | Verify `GEMINI_API_KEY` in `.env` and check rate limits |
-| Calendar auth error | Delete `token.json` and re-authorize |
-| Port 8000 in use | Change `API_PORT` in `.env` or use `--port 8001` |
+| Issue | Cause | Solution |
+|:------|:------|:---------|
+| **"Couldn't link device"** | Stale session or device limit | In WhatsApp on your phone, check **Linked Devices** (max 4). On `http://localhost:8000/qr`, click **"🔄 Get Fresh QR Code"** and scan immediately. |
+| **Webhook not received** | Docker bridge routing | Evolution API inside Docker must forward to `http://python-backend:8000/webhook`, NOT `host.docker.internal`. `src/api/main.py` configures this automatically on boot. |
+| **Gemini 429 Quota Exceeded** | `gemini-2.5-flash` daily limit (20 RPD) | The system uses `src/agents/llm_router.py` which prioritizes `gemini-2.5-flash-lite` (1,500 RPD) and falls back to Groq Cloud automatically. |
+| **Calendar deletion not matching** | Language or timeframe mismatch | The updated `delete_events` engine searches `[-30d, +180d]`, uses English-Arabic subject translation, and falls back to LLM matching. |
+| **Port 8000 in use** | Port conflict | Adjust `API_PORT` in `.env` and `docker-compose.yml`. |

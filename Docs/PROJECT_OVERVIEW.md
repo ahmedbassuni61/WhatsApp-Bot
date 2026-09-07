@@ -34,9 +34,11 @@ College students deal with fragmented study resources:
 - Relevant lecture slides or video frames are attached as images
 
 ### 📅 Schedule & Calendar Sync
-- A listener monitors the **announcement WhatsApp group** for lab/event schedules
-- Parsed events are automatically synced to **Google Calendar**
-- Query upcoming schedule via the bot: "What labs do I have this week?"
+- Monitors announcement groups or direct messages for exam timetables, section announcements, and lecture updates.
+- **Multimodal Timetable Image Parsing**: Uses Gemini Flash Lite vision to read complex, multi-column university exam schedules in Arabic and English (e.g. Faculty of Engineering schedules) and automatically schedules exams with times, locations, and descriptions in seconds.
+- **Multi-User Shared Calendar (Option 1)**: Syncs to a dedicated shared Google Calendar, allowing students and faculty to subscribe and receive real-time updates and reminders.
+- **Natural Language & Bulk Event Deletion**: Delete events on-demand (`/delete math`, `delete all exam schedule`, `احذف امتحان الرياضيات`).
+- Query upcoming schedule via `/schedule` or `جدول`.
 
 ### 🖼️ Answer-to-Image Export
 - When a student **confirms** an answer is correct, it's converted into a styled study image or PDF
@@ -48,20 +50,21 @@ College students deal with fragmented study resources:
 | Concept | Implementation |
 |:--------|:---------------|
 | **Agentic AI** | LangGraph state machine with query routing, retrieval, multi-LLM verification, and answer composition |
+| **Multi-LLM Router** | Automatic failover across Google Gemini (Flash Lite / Latest) and Groq Cloud (Llama 3.3 70B, Qwen, Allam) |
 | **RAG** | ChromaDB vector store + FastEmbed embeddings + semantic chunking |
-| **Multi-Modal** | Gemini vision for image analysis, Whisper for audio/video transcription |
+| **Multi-Modal** | Gemini vision for timetable and problem analysis, Whisper for audio/video transcription |
 | **Cost** | **$0/month** — all free-tier APIs, local embeddings, open-source tools |
 
 ## Tech Stack
 
-- **Python** (FastAPI, LangGraph, LangChain)
+- **Python** (FastAPI, LangGraph, LangChain, Pydantic)
+- **Evolution API v2 & PostgreSQL** (WhatsApp Gateway via Baileys)
 - **ChromaDB** (vector database)
-- **Google Gemini 2.0 Flash** + **Groq Llama 3.3 70B** + **Cerebras** (LLMs)
+- **Google Gemini (Flash Lite / Latest)** + **Groq Cloud (Llama 3.3 70B, Qwen, Allam)** (LLMs)
+- **Google Calendar API** (shared calendar sync with automated reminders)
 - **FastEmbed** (local embeddings)
 - **OpenAI Whisper** (transcription)
-- **Baileys / Evolution API** (WhatsApp)
-- **Google Calendar API** + **Google Drive API**
-- **Docker** (deployment)
+- **Docker & Docker Compose** (full stack containerization)
 - **Oracle Cloud Always Free** (hosting)
 
 ## Skills Demonstrated (for CV)

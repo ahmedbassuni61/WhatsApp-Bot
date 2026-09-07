@@ -106,7 +106,12 @@
 
 ### 4. Agent Layer (`src/agents/`)
 
-**Responsibility**: Agentic reasoning with multi-LLM verification.
+**Responsibility**: Resilient multi-provider routing and agentic verification.
+
+- **`llm_router.py`**:
+  - Automatically rotates requests across Google Gemini (`gemini-2.5-flash-lite`, `gemini-flash-latest`, `gemini-3.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `qwen/qwen3.8-27b`, `allam-2-7b`).
+  - Shields the bot from Google free-tier 429 quota exhaustion.
+  - Supports multimodal vision inputs (`PIL.Image`).
 
 **LangGraph State**:
 ```python
@@ -126,23 +131,39 @@ class AgentState(TypedDict):
 
 ### 5. WhatsApp Layer (`src/whatsapp/`)
 
-**Responsibility**: Interface between WhatsApp and the agent.
+**Responsibility**: WhatsApp gateway communication, media extraction, schedule ingestion, and calendar synchronization.
 
-- **Bot**: Receives messages, routes to agent, sends responses
-- **Group Listener**: Monitors announcement group, extracts schedule
-- **Calendar Sync**: Pushes events to Google Calendar
+- **`evolution_client.py`**:
+  - Full async REST client for Evolution API v2.
+  - Media decryption via `/chat/getBase64FromMediaMessage`.
+  - Session lifecycle management (connect, QR, reset, status).
+- **`bot.py`**:
+  - Webhook dispatcher with humanized typing presence (`composing`, jittered delay between 1.5s - 4.0s).
+  - Routes group messages to `GroupListener` and direct messages to study assistant.
+- **`group_listener.py`**:
+  - Multimodal schedule parser utilizing `llm_router`.
+  - Extracts structured JSON schedule events from Arabic/English text and university timetable images.
+- **`calendar_sync.py`**:
+  - Direct integration with Google Calendar API.
+  - Syncs to a shared secondary calendar (`Option 1`) for multi-user access.
+  - Color-coded events with automatic 1h & 15m reminders.
+  - Intelligent deletion engine: supports bulk clearing (`delete all`), cross-language subject mapping, and LLM matching.
 
 ### 6. API Layer (`src/api/`)
 
-**Responsibility**: HTTP interface for all components.
+**Responsibility**: FastAPI HTTP interface, lifecycle management, and webhooks.
 
 ```
-POST /webhook          ← WhatsApp incoming messages
-POST /query            ← Direct query (testing/web UI)
-POST /ingest           ← Trigger file ingestion
-GET  /schedule         ← Upcoming events
-GET  /health           ← System health check
-GET  /docs             ← Auto-generated API docs (FastAPI)
+POST /webhook          ← WhatsApp incoming messages (from Evolution API)
+POST /query            ← Direct Q&A endpoint (routes through llm_router)
+GET  /schedule         ← Upcoming events from Google Calendar
+POST /schedule/delete  ← Delete event endpoint (keyword + date)
+GET  /groups           ← List joined WhatsApp groups and JIDs
+GET  /qr               ← Browser-based interactive pairing dashboard
+GET  /qr/json          ← Real-time QR base64 and connection state
+POST /qr/reset         ← Re-initialize session and generate fresh QR
+GET  /health           ← System health check (reports whatsapp_connected)
+GET  /docs             ← Auto-generated OpenAPI Swagger documentation
 ```
 
 ## Deployment Topology (Oracle Cloud)

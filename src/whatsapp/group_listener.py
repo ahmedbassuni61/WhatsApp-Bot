@@ -23,12 +23,24 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+from src.tools.time_tool import time_tool
+
 # Configure Gemini for schedule parsing
 genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
 
 SCHEDULE_PARSE_PROMPT = """You are an intelligent college schedule parsing assistant.
 Analyze the following WhatsApp message (and attached schedule/timetable image if present).
 Extract the relevant academic schedule items (exams, lectures, labs, deadlines).
+
+GUIDELINES FOR RELATIVE DATES & TIMES (e.g. 'next hour', 'in 2 hours', 'tomorrow at 3pm', 'كمان ساعة', 'بعد ساعتين', 'بكرة'):
+1. Refer to the GROUND TRUTH local time and date below.
+2. If the user specifies a relative time (e.g. "next hour", "in 2 hours", "كمان ساعة", "بعد ساعتين"):
+   - Compute the exact target time by adding the offset to the Current Time.
+   - For example: if Current Time is 02:40 and user says "next hour", "time_start" MUST be "03:40".
+   - If the offset crosses midnight (e.g. 23:30 + 2 hours = 01:30), the date MUST advance to the next day!
+3. If the user specifies "tomorrow" or "بكرة", the date MUST be tomorrow's date.
+4. "time_start" MUST be in 24-hour HH:MM format and MUST NOT be null when a time or relative time is requested.
+5. "time_end": 24-hour HH:MM format. If not explicitly specified, default to 1 hour after time_start.
 
 GUIDELINES FOR LARGE / COMPLEX TIMETABLE IMAGES:
 1. If the image is a multi-column university-wide timetable containing many programs/departments:
@@ -38,9 +50,9 @@ GUIDELINES FOR LARGE / COMPLEX TIMETABLE IMAGES:
 2. Date & Time Format:
    - "date": MUST be ISO format YYYY-MM-DD (e.g., 2026-08-30). Infer the year from the image header or current date.
    - "time_start": 24-hour format HH:MM (e.g. 09:00, 11:30, 14:00, 16:30). Convert "9:00 ص" to "09:00", "2:00 م" to "14:00".
-   - "time_end": 24-hour format HH:MM if listed, otherwise null.
+   - "time_end": 24-hour format HH:MM if listed, otherwise default to 1 hour after time_start or null.
 3. Return a valid JSON array of objects with:
-   - "title": string (e.g. "[البرنامج العام] رياضيات 1" or "CS201 Midterm")
+   - "title": string (e.g. "[البرنامج العام] رياضيات 1" or "CS201 Midterm" or "Deadline")
    - "action": "create" | "cancel"
    - "date": "YYYY-MM-DD"
    - "time_start": "HH:MM"
@@ -49,7 +61,7 @@ GUIDELINES FOR LARGE / COMPLEX TIMETABLE IMAGES:
    - "event_type": "exam" | "lecture" | "lab" | "section" | "deadline" | "other"
    - "description": string (e.g. department, notes, semester)
 
-Today is {today}.
+{time_context}
 The text message/caption is:
 ---
 {message}
@@ -125,9 +137,9 @@ class GroupListener:
         import base64 as b64module
         from src.agents.llm_router import llm_router
 
-        today = datetime.now().strftime("%Y-%m-%d (%A)")
+        time_context = time_tool.get_time_context_prompt()
         display_text = message_text or "(Image of schedule/announcement attached)"
-        prompt = SCHEDULE_PARSE_PROMPT.format(today=today, message=display_text)
+        prompt = SCHEDULE_PARSE_PROMPT.format(time_context=time_context, message=display_text)
 
         pil_img = None
         if media and media.get("base64"):
@@ -142,7 +154,11 @@ class GroupListener:
             except Exception as b64_err:
                 logger.error("Failed to decode image: %s", b64_err)
 
-        raw_text = await llm_router.generate(prompt, image=pil_img)
+        raw_text = ""
+        try:
+            raw_text = await llm_router.generate(prompt, image=pil_img)
+        except Exception as llm_err:
+            logger.error("LLM schedule parsing generation failed: %s", llm_err)
 
         # Clean up: extract JSON block from markdown fences
         if "```json" in raw_text:
@@ -152,18 +168,19 @@ class GroupListener:
         else:
             raw_text = raw_text.strip()
 
+        events = []
         try:
-            events = json.loads(raw_text)
+            if raw_text:
+                events = json.loads(raw_text)
         except json.JSONDecodeError:
             logger.warning("Gemini returned invalid JSON: %s", raw_text[:200])
-            return []
 
         if isinstance(events, dict):
             events = events.get("events") or events.get("schedule") or [events]
 
         if not isinstance(events, list):
             logger.warning("Gemini returned non-list: %s", type(events))
-            return []
+            events = []
 
         # Validate and clean each event
         clean_events = []
@@ -172,7 +189,8 @@ class GroupListener:
                 continue
             if not event.get("title"):
                 continue
-            clean_events.append({
+
+            cleaned = {
                 "title": event.get("title", ""),
                 "action": event.get("action", "create"),
                 "date": event.get("date"),
@@ -182,6 +200,29 @@ class GroupListener:
                 "event_type": event.get("event_type", "other"),
                 "description": event.get("description", ""),
                 "source_message": message_text[:500],
-            })
+            }
+
+            # Guarantee relative times are mathematically correct
+            if message_text:
+                cleaned = time_tool.patch_event_time(cleaned, message_text)
+
+            clean_events.append(cleaned)
+
+        # Fallback: if LLM returned nothing or errored, but text has a clear relative deadline expression
+        if not clean_events and message_text and not media:
+            rel = time_tool.resolve_relative_time_phrase(message_text)
+            if rel and ("deadline" in message_text.lower() or "تسليم" in message_text or "ميعاد" in message_text or "add" in message_text.lower() or "ضيف" in message_text):
+                logger.info("Deterministic fallback extracted event from relative phrase: %s", rel)
+                clean_events.append({
+                    "title": "Deadline",
+                    "action": "create",
+                    "date": rel["date"],
+                    "time_start": rel["time_start"],
+                    "time_end": rel["time_end"],
+                    "location": None,
+                    "event_type": "deadline",
+                    "description": f"Scheduled via WhatsApp: {message_text}",
+                    "source_message": message_text[:500],
+                })
 
         return clean_events

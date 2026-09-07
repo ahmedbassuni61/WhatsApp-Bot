@@ -85,6 +85,8 @@ services:
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
       - WEBHOOK_URL=http://python-backend:8000/webhook
       - API_PORT=8000
+      - TIMEZONE=${TIMEZONE:-Africa/Cairo}
+      - TZ=${TIMEZONE:-Africa/Cairo}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./src:/app/src

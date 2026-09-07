@@ -32,6 +32,7 @@ from src.whatsapp.bot import WhatsAppBot
 from src.whatsapp.calendar_sync import CalendarSync
 from src.whatsapp.evolution_client import EvolutionClient
 from src.whatsapp.group_listener import GroupListener
+from src.tools.time_tool import time_tool
 
 load_dotenv()
 
@@ -205,7 +206,43 @@ Return ONLY a JSON object with:
             except Exception as e:
                 logger.warning("Intent deletion error: %s", e)
 
-        # 4. Standard Academic Study Assistant
+        # 4. Check for natural language calendar ADD / DEADLINE intents
+        is_add_intent = (
+            any(w in lower for w in [
+                "add", "schedule", "remind", "set", "deadline", "ضيف", "سجل", "حط", "ميعاد", "تسليم", "عندي", "فكرني"
+            ])
+            and any(w in lower for w in [
+                "deadline", "exam", "lab", "lecture", "session", "assignment", "quiz", "task", "meeting", "class",
+                "تسليم", "امتحان", "كويز", "سكشن", "محاضرة", "تاسك", "ميعاد", "مشروع", "بروجكت", "next hour", "tomorrow", "كمان ساعة", "بعد ساعة"
+            ])
+        ) or bool(time_tool.resolve_relative_time_phrase(text) and any(w in lower for w in ["deadline", "exam", "lab", "task", "تسليم", "امتحان", "تاسك", "ميعاد"]))
+
+        if is_add_intent:
+            try:
+                events = await group_listener._parse_schedule(text, None)
+                if events:
+                    confirmations = []
+                    for event in events:
+                        created = await calendar_sync.create_event(event)
+                        if created:
+                            time_text = f" on {event.get('date')}" if event.get('date') else ""
+                            if event.get("time_start"):
+                                time_text += f" at {event.get('time_start')}"
+                            loc_text = f"\n📍 Location: {event.get('location')}" if event.get('location') else ""
+                            confirmations.append(
+                                f"📅 *Added to Google Calendar!*\n"
+                                f"📌 *{created.get('summary')}*\n"
+                                f"🕐 {time_text.strip()}{loc_text}\n"
+                                f"🔔 Reminders set: 1 hr & 15 mins before."
+                            )
+                        else:
+                            confirmations.append(f"ℹ️ *{event.get('title')}* is already on your calendar.")
+                    if confirmations:
+                        return "\n\n".join(confirmations)
+            except Exception as e:
+                logger.error("Direct message schedule add error: %s", e)
+
+        # 5. Standard Academic Study Assistant
         try:
             from src.agents.llm_router import llm_router
             prompt = (
@@ -636,6 +673,12 @@ async def qr_page():
     </body>
     </html>
     """
+
+
+@app.get("/time")
+async def get_time():
+    """Return the bot's current timezone-aware date and time information."""
+    return time_tool.get_current_time()
 
 
 @app.get("/health", response_model=HealthResponse)

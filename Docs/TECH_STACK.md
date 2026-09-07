@@ -4,41 +4,40 @@ Every technology in this project was selected for **zero cost** operation at mea
 
 ---
 
-## 1. LLM Providers (All Free Tier)
+## 1. Multi-LLM Router Architecture (`src/agents/llm_router.py`)
 
-### Primary: Google Gemini 2.0 Flash
-- **Free Limits**: 10-15 RPM, 1,000-1,500 RPD, 250k-1M TPM
-- **Context Window**: 1,000,000+ tokens
-- **Why chosen**: Massive context window (can fit entire lectures), native multimodal (text + images + audio), fastest free model
-- **Use case**: Primary Q&A, vision-based problem solving (photo of a question), large document analysis
+A centralized, resilient multi-LLM router with automatic failover across free-tier providers to prevent rate-limit interruptions.
 
-### Verification: Groq Cloud — Llama 3.3 70B
-- **Free Limits**: 30 RPM, 1,000 RPD, 12,000 TPM (no credit card required)
-- **Context Window**: 128,000 tokens
-- **Why chosen**: 300-800 tokens/second generation speed (custom LPU hardware), GPT-4-class quality
-- **Use case**: Independent answer verification, fast reasoning
+### Primary Vision & Parsing: Google Gemini
+- **`gemini-2.5-flash-lite` (Default)**:
+  - **Free Limits**: 15 RPM, 1,500 Requests Per Day, 250k TPM
+  - **Strengths**: Lightning fast, full multimodal vision (extracts 15+ exam dates and times from low-contrast timetable images in ~5-9s), generous daily budget.
+- **`gemini-flash-latest` & `gemini-3.5-flash-lite`**:
+  - Secondary multimodal failover when lite limits are approached.
+- **`gemini-2.5-flash`**:
+  - Retained as last-resort fallback due to strict Google AI Studio free-tier limit of **20 Requests Per Day**.
 
-### Backup: Cerebras Cloud — Llama 3.3 70B
-- **Free Limits**: 30 RPM, 60,000 TPM, 1,000,000 tokens/day
-- **Context Window**: 128,000 tokens (8k burst on free tier)
-- **Why chosen**: Fastest inference in the world (1,800+ tok/s on 8B model), generous daily token budget
-- **Use case**: Tertiary verification, backup when Groq limits hit
+### Verification & High-Speed Reasoning: Groq Cloud
+- **Models**:
+  - `llama-3.3-70b-versatile` (70B parameter open-weights leader)
+  - `qwen/qwen3.8-27b` (bilingual mathematical and reasoning specialist)
+  - `allam-2-7b` (Arabic language specialist)
+- **Free Limits**: 30 RPM, 1,000 RPD (no credit card required)
+- **Speed**: 300-800 tokens/second on custom LPUs.
+- **Role**: Text Q&A fallback, answer verification, consensus checking, bilingual query translation.
 
-### Fallback Chain: OpenRouter Free → GitHub Models → Ollama
-- **OpenRouter**: 20 RPM, ~200 RPD — access to DeepSeek R1, Llama 3.3, Gemini Flash for free
-- **GitHub Models**: 15 RPM, 50-150 RPD — access to GPT-4o, Claude 3.5 Sonnet via PAT
-- **Ollama (Local)**: Unlimited — runs locally when all cloud limits are exhausted
+### Tertiary Fallbacks
+- **Cerebras Cloud**: 1M tokens/day of Llama 3.3 70B at 1,800 tok/s.
+- **OpenRouter Free Tier**: Access to DeepSeek R1, Llama 3.3, and Qwen.
 
-### Combined Daily Capacity (Free)
-| Provider | Daily Requests | Role |
-|:---------|:--------------|:-----|
-| Gemini | ~1,500 | Primary answers |
-| Groq | ~1,000 | Verification |
-| Cerebras | ~500-1,000 | Verification |
-| OpenRouter | ~200 | Fallback |
-| GitHub Models | ~50-150 | Emergency fallback |
-| Ollama | Unlimited | Offline/batch |
-| **Total** | **~3,500-4,000+** | |
+### Combined Daily Free Capacity
+| Provider & Model Tier | Daily Requests | Primary Capability |
+|:----------------------|:---------------|:-------------------|
+| Gemini Flash Lite / Latest | ~1,500 RPD | Multimodal vision, timetable OCR, primary Q&A |
+| Groq (Llama 3.3 / Qwen / Allam) | ~1,000 RPD | Fast text generation, Arabic NLP, verification |
+| Cerebras (Llama 3.3) | ~500-1,000 RPD | High-throughput backup |
+| OpenRouter Free | ~200 RPD | Emergency fallback |
+| **Total Guaranteed Free** | **~3,000-3,500+ / day** | Completely $0/month |
 
 ---
 
@@ -103,21 +102,15 @@ chroma_db/
 
 ## 6. WhatsApp: Baileys / Evolution API
 
-### Option A: Baileys (Direct)
-- **Type**: TypeScript/Node.js library, direct WebSocket to WhatsApp
-- **RAM**: ~80MB (no Chromium)
-- **Pros**: Lightweight, fast, well-maintained
-- **Cons**: Need to write Node.js bridge to Python backend
-
-### Option B: Evolution API (Recommended)
-- **Type**: Self-hosted Docker container wrapping Baileys
-- **RAM**: ~150MB
-- **Pros**: Exposes a full REST API + webhooks — Python can call it directly
-- **Cons**: Extra Docker container
-
-### Current: whatsapp-web.js
-- **RAM**: 300MB-1GB (runs headless Chromium)
-- **Status**: Works but heavy; will be migrated
+### Implemented Architecture: Evolution API v2 (Docker + PostgreSQL)
+- **Engine**: Self-hosted Evolution API v2 wrapping Baileys WebSocket protocol.
+- **Database**: PostgreSQL 15 (`evolution_postgres`) for persistent Multi-Device authentication state.
+- **Networking**: Runs in Docker network `college-net`. Webhook routes directly to `http://python-backend:8000/webhook`.
+- **Key Features**:
+  - Full REST API client (`src/whatsapp/evolution_client.py`).
+  - Base64 decrypted media extraction for images, audio, and documents.
+  - Humanized typing indicators (`composing`, jittered delay between 1.5s - 4.0s) to minimize ban risk.
+  - Interactive browser pairing at `/qr` with auto-refresh and instant connection detection.
 
 ---
 
@@ -128,19 +121,25 @@ chroma_db/
 - **Network**: 10TB/month egress, static IPv4
 - **Uptime**: 24/7 always on (never sleeps, never expires)
 - **Cost**: $0 forever (requires credit card for verification only)
-- **Why chosen**: Enough resources to run the entire stack (Python backend + WhatsApp gateway + ChromaDB + Whisper) on a single VM
+- **Why chosen**: Enough resources to run the entire stack (Python backend + WhatsApp gateway + Postgres + ChromaDB + Whisper) on a single VM
 
 ---
 
 ## 8. APIs & Integrations
 
+### Google Calendar API
+- **Cost**: Free
+- **Authentication**: OAuth 2.0 with `token.json` (auto-refreshes).
+- **Multi-User Sharing (Option 1)**: Supports writing to a dedicated shared secondary calendar ID (`GOOGLE_CALENDAR_ID` in `.env`), enabling unlimited students to view updates without requiring individual OAuth credentials.
+- **Security**: `credentials.json` and `token.json` are excluded from Git via `.gitignore`.
+- **Engine**:
+  - Auto-creates color-coded events with reminders (1 hour and 15 mins prior).
+  - Duplicate detection.
+  - Intelligent deletion: bulk clearing, cross-language English ↔ Arabic translation, and LLM matching fallback.
+
 ### Google Drive API
 - **Cost**: Free (15GB storage included with Google account)
 - **Use**: Watch for new lecture uploads, auto-trigger ingestion
-
-### Google Calendar API
-- **Cost**: Free
-- **Use**: Sync parsed schedule events from WhatsApp announcement group
 
 ---
 
