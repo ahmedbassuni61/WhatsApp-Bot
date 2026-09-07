@@ -1,3 +1,46 @@
-node_modules/
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data & databases
+chroma_db/
+data/images/
+*.db
+
+# Environment & Secrets
 .env
+credentials.json
+token.json
+token*.json
+credentials*.json
+*.pem
+*.key
+qr_code.png
+
+# Node (legacy WhatsApp layer)
+node_modules/
 .wwebjs_auth/
+.wwebjs_cache/
+
+# Docker
+docker-data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/

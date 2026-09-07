@@ -1,0 +1,107 @@
+# ============================================
+# College Assistant AI — Docker Compose
+# ============================================
+# Run:  docker-compose up -d
+# Logs: docker-compose logs -f
+
+services:
+  # ---------------------------------------- #
+  # PostgreSQL — required by Evolution API v2
+  # ---------------------------------------- #
+  evolution-postgres:
+    image: postgres:15
+    container_name: evolution_postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=evolution_db
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=evolution_pass_2026
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - college-net
+
+  # ---------------------------------------- #
+  # Evolution API — WhatsApp Gateway (Baileys)
+  # ---------------------------------------- #
+  evolution-api:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution_api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      # Server
+      - SERVER_URL=http://localhost:8080
+
+      # Authentication — change this key!
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:-my_secure_bot_key_2026}
+
+      # PostgreSQL database (required in v2)
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution_pass_2026@evolution-postgres:5432/evolution_db?schema=evolution_api
+
+      # Save message data
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+
+      # Disable Redis (not needed for single instance)
+      - REDIS_ENABLED=false
+      - REDIS_URI=
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+
+      # Disable global webhook (we configure per-instance via API)
+      - WEBHOOK_GLOBAL_ENABLED=false
+
+    depends_on:
+      - evolution-postgres
+    networks:
+      - college-net
+
+  # ---------------------------------------- #
+  # Python Backend — FastAPI + AI Agent
+  # ---------------------------------------- #
+  python-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: college_assistant
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-my_secure_bot_key_2026}
+      - EVOLUTION_API_URL=http://evolution-api:8080
+      - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME:-college-bot}
+      - ANNOUNCEMENT_GROUP_JID=${ANNOUNCEMENT_GROUP_JID:-}
+      - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
+      - WEBHOOK_URL=http://python-backend:8000/webhook
+      - API_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json
+    depends_on:
+      - evolution-api
+    networks:
+      - college-net
+
+volumes:
+  postgres_data:
+  evolution_instances:
+  evolution_store:
+
+networks:
+  college-net:
+    driver: bridge

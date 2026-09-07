@@ -7,7 +7,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 // 1. Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 // We use gemini-1.5-flash as it is the fastest and most cost-effective model
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
 // 2. Initialize WhatsApp Client
 // LocalAuth saves your session so you don't have to scan the QR code every time

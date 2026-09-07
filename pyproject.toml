@@ -1,0 +1,62 @@
+[project]
+name = "college-assistant-ai"
+version = "0.1.0"
+description = "RAG-powered college assistant with multi-LLM verification, WhatsApp integration, and Google Calendar sync"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    # --- API Framework ---
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+
+    # --- LLM Providers ---
+    "google-generativeai>=0.8.0",
+    "groq>=0.11.0",
+    "cerebras-cloud-sdk>=1.0.0",
+    "openai>=1.50.0",           # OpenRouter uses OpenAI-compatible API
+
+    # --- RAG & Agents ---
+    "langchain>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langchain-groq>=0.2.0",
+    "langgraph>=0.2.0",
+    "chromadb>=0.5.0",
+
+    # --- Embeddings ---
+    "fastembed>=0.4.0",
+
+    # --- Document Processing ---
+    "PyMuPDF>=1.24.0",          # PDF extraction (fitz)
+    "pillow>=10.0.0",           # Image processing
+
+    # --- Audio/Video ---
+    "faster-whisper>=1.0.0",    # Speech-to-text (Whisper via CTranslate2)
+
+    # --- Google APIs ---
+    "google-api-python-client>=2.140.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+asyncio_mode = "auto"
