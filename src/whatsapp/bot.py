@@ -71,7 +71,7 @@ class WhatsAppBot:
 
         # Only process incoming messages
         if event != "messages.upsert":
-            logger.debug("Ignoring event: %s", event)
+            logger.debug("Ignoring non-message event: %s", event)
             return
 
         data = payload.get("data", {})
@@ -81,10 +81,12 @@ class WhatsAppBot:
 
         # Skip messages sent by the bot itself
         if from_me:
+            logger.debug("Skipping own message to %s", remote_jid[:20])
             return
 
         # Skip status broadcasts
         if remote_jid == "status@broadcast":
+            logger.debug("Skipping status broadcast")
             return
 
         # Extract message text
@@ -96,10 +98,12 @@ class WhatsAppBot:
         # Extract media if present
         media_info = self._extract_media_info(data, message_obj, message_type)
         if media_info and not media_info.get("base64"):
+            logger.debug("Fetching base64 media for %s message", media_info.get("type"))
             try:
                 b64 = await self.client.get_base64_from_media(data)
                 if b64:
                     media_info["base64"] = b64
+                    logger.debug("Media base64 fetched (%d chars)", len(b64))
             except Exception as e:
                 logger.error("Failed to fetch media base64: %s", e)
 
@@ -112,26 +116,40 @@ class WhatsAppBot:
             "raw": data,
         }
 
+        is_group = remote_jid.endswith("@g.us")
+        channel = "GROUP" if is_group else "DM"
+        media_tag = f" +{media_info['type']}" if media_info else ""
+
+        # Visual separator for the start of a new message
+        logger.info("\n" + "═" * 70)
         logger.info(
-            "Message from %s (%s): %s [type=%s]",
+            "📩 [%s] %s (%s): '%s' [type=%s%s]",
+            channel,
             sender_name,
-            remote_jid[:20],
-            text[:80] if text else "(media)",
+            remote_jid[:25],
+            text[:100] if text else "(no text)",
             message_type,
+            media_tag,
         )
 
         # Route to appropriate handler
-        is_group = remote_jid.endswith("@g.us")
-
         if is_group:
             if self._on_group_message:
+                logger.info("  → Routing to group handler")
                 response = await self._on_group_message(parsed)
                 if response:
+                    logger.info("📤 [GROUP] Response to %s (%d chars): '%s'",
+                                remote_jid[:25], len(response), response[:120])
                     await self.send_reply(remote_jid, response)
+                else:
+                    logger.info("  → Group handler returned no response (not an announcement)")
         else:
             if self._on_direct_message:
+                logger.info("  → Routing to direct message agent")
                 response = await self._on_direct_message(parsed)
                 if response:
+                    logger.info("📤 [DM] Response to %s (%d chars): '%s'",
+                                sender_name, len(response), response[:120])
                     await self.send_reply(remote_jid, response)
 
     async def send_reply(self, to_jid: str, response: str | dict) -> None:

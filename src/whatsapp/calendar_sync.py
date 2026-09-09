@@ -293,27 +293,12 @@ class CalendarSync:
             return False  # On error, allow creation
 
     async def delete_events(self, query: str = "", date_str: str | None = None) -> list[str]:
-        """
-        Delete Google Calendar events matching query keyword and optional date.
-
-        Supports:
-        - Bulk deletion: "all", "all exams", "كل الامتحانات", etc.
-        - Cross-lingual matching (e.g. "math" matches "رياضيات")
-        - LLM-assisted matching for complex or dialectal phrasing
-        """
+        """Delete Google Calendar events matching the query keyword, or 'all' for bulk deletion."""
         service = self._get_service()
         deleted = []
 
         now = datetime.utcnow()
         clean_q = (query or "").strip().lower()
-
-        # Check for bulk delete intent
-        bulk_keywords = {
-            "all", "all exams", "all events", "all exam schedule", "all schedule",
-            "everything", "كل", "الكل", "كل الامتحانات", "كل المواعيد", "كل الجدول",
-            "جدول الامتحانات بالكامل", "جميع الامتحانات", "مسح الكل", "حذف الكل", "*"
-        }
-        is_bulk = clean_q in bulk_keywords or not clean_q
 
         params = {
             "calendarId": self.calendar_id,
@@ -329,90 +314,17 @@ class CalendarSync:
             params["timeMin"] = (now - timedelta(days=30)).isoformat() + "Z"
             params["timeMax"] = (now + timedelta(days=180)).isoformat() + "Z"
 
+        # If it's a specific query (not 'all'), use Google Calendar's native search
+        if clean_q != "all" and clean_q != "":
+            params["q"] = query
+
         try:
             result = service.events().list(**params).execute()
-            all_items = result.get("items", [])
+            matched_items = result.get("items", [])
 
-            if not all_items:
-                logger.info("No events found in calendar window.")
+            if not matched_items:
+                logger.info("No events found matching query: %s", query)
                 return []
-
-            matched_items = []
-
-            if is_bulk:
-                logger.info("Bulk delete requested: removing all %d events", len(all_items))
-                matched_items = all_items
-            else:
-                # Subject translation dictionary for cross-lingual search
-                subject_map = {
-                    "math": "رياضيات",
-                    "maths": "رياضيات",
-                    "calculus": "تفاضل",
-                    "physics": "فيزياء",
-                    "chemistry": "كيمياء",
-                    "mechanics": "ميكانيكا",
-                    "drawing": "رسم",
-                    "english": "انجليز",
-                    "civil": "مدني",
-                    "electrical": "كهرب",
-                    "sanitary": "صرف صحي",
-                    "roads": "طرق",
-                    "railways": "سكك",
-                    "construction": "تشييد",
-                    "materials": "مواد",
-                    "structures": "منشآت",
-                    "surveying": "مساحة",
-                    "management": "إدارة",
-                    "hydraulics": "هيدروليك",
-                }
-
-                # Build search tokens
-                tokens = clean_q.split()
-                expanded_tokens = set(tokens)
-                for t in tokens:
-                    if t in subject_map:
-                        expanded_tokens.add(subject_map[t])
-
-                # 1. Direct and token matching
-                for item in all_items:
-                    summary = item.get("summary", "").lower()
-                    desc = item.get("description", "").lower()
-                    full_text = f"{summary} {desc}"
-
-                    if clean_q in full_text:
-                        matched_items.append(item)
-                    elif any(tok in full_text for tok in expanded_tokens):
-                        matched_items.append(item)
-
-                # 2. If no direct match found, use LLM router to find matching events
-                if not matched_items and all_items:
-                    try:
-                        import json
-                        from src.agents.llm_router import llm_router
-
-                        events_summary = [
-                            {"id": it.get("id"), "summary": it.get("summary"), "date": it.get("start", {}).get("dateTime") or it.get("start", {}).get("date")}
-                            for it in all_items
-                        ]
-                        match_prompt = f"""Given the following list of calendar events:
-{json.dumps(events_summary, ensure_ascii=False)}
-
-The user wants to delete/cancel events matching: "{query}"
-
-Return ONLY a JSON array of the matching event "id" strings. If none match, return []."""
-
-                        llm_res = await llm_router.generate(match_prompt)
-                        clean_json = llm_res.strip()
-                        if "```json" in clean_json:
-                            clean_json = clean_json.split("```json", 1)[1].split("```", 1)[0].strip()
-                        elif "```" in clean_json:
-                            clean_json = clean_json.split("```", 1)[1].split("```", 1)[0].strip()
-
-                        matched_ids = json.loads(clean_json)
-                        if isinstance(matched_ids, list):
-                            matched_items = [it for it in all_items if it.get("id") in matched_ids]
-                    except Exception as match_err:
-                        logger.warning("LLM event matching fallback error: %s", match_err)
 
             # Perform deletions
             for item in matched_items:

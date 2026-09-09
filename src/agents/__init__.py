@@ -1,1 +1,1 @@
-"""Agents layer — LangGraph state machine, LLM router, verifier, answer composer."""
+"""Agents layer — LLM router, tool-calling agent, and tool definitions."""

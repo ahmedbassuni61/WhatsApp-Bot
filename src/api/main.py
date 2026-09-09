@@ -12,14 +12,25 @@ Run with:
     uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 """
 
+# ------------------------------------------------------------------ #
+# Imports (consolidated at the top)
+# ------------------------------------------------------------------ #
+import asyncio
+import base64 as b64mod
+import io
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import PIL.Image
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from src.agents.agent import process_message
+from src.agents.llm_router import llm_router
+from src.agents.tools import init_tools
 from src.api.models import (
     DeleteEventRequest,
     DeleteEventResponse,
@@ -28,24 +39,44 @@ from src.api.models import (
     QueryResponse,
     ScheduleResponse,
 )
+from src.tools.time_tool import time_tool
 from src.whatsapp.bot import WhatsAppBot
 from src.whatsapp.calendar_sync import CalendarSync
 from src.whatsapp.evolution_client import EvolutionClient
 from src.whatsapp.group_listener import GroupListener
-from src.tools.time_tool import time_tool
 
 load_dotenv()
 
 # ------------------------------------------------------------------ #
 # Logging
 # ------------------------------------------------------------------ #
+# Resolve absolute path to the project root (3 levels up from main.py)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_FILE = DATA_DIR / "bot.log"
+if not LOG_FILE.exists():
+    LOG_FILE.touch()
+
+# Console gets full diagnostic details
+console = logging.StreamHandler()
+console.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+
+# File gets ultra-clean, simple format (just Time + Message)
+file_log = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
+file_log.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[console, file_log]
 )
 logger = logging.getLogger(__name__)
 
+# Silence third-party spam (FastAPI/HTTPX background noise)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # ------------------------------------------------------------------ #
 # Shared state (initialized at startup)
@@ -56,6 +87,28 @@ group_listener: GroupListener | None = None
 calendar_sync: CalendarSync | None = None
 
 
+# ------------------------------------------------------------------ #
+# Helpers shared by direct & group handlers
+# ------------------------------------------------------------------ #
+
+def _decode_image(media: dict | None) -> PIL.Image.Image | None:
+    """Decode a base64 media dict into a PIL Image, or return None."""
+    if not media or media.get("type") != "image" or not media.get("base64"):
+        return None
+    raw = media["base64"]
+    clean = raw.split(",", 1)[1] if "," in raw else raw
+    try:
+        return PIL.Image.open(io.BytesIO(b64mod.b64decode(clean)))
+    except Exception as e:
+        logger.error("Failed to decode image: %s", e)
+        return None
+
+
+# ------------------------------------------------------------------ #
+# Lifespan
+# ------------------------------------------------------------------ #
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
@@ -63,281 +116,42 @@ async def lifespan(app: FastAPI):
 
     logger.info("🚀 Starting College Assistant AI...")
 
-    # Initialize Evolution API client
+    # Initialize components
     evolution_client = EvolutionClient()
-
-    # Initialize WhatsApp bot
     announcement_jid = os.getenv("ANNOUNCEMENT_GROUP_JID", "")
     whatsapp_bot = WhatsAppBot(
         evolution_client=evolution_client,
         announcement_group_jid=announcement_jid,
     )
-
-    # Initialize group listener
     group_listener = GroupListener(announcement_group_jid=announcement_jid)
-
-    # Initialize calendar sync
     calendar_sync = CalendarSync()
 
-    # ---- Wire up message handlers ---- #
+    # Wire tool dependencies so the agent can call calendar / LLM
+    init_tools(calendar_sync=calendar_sync, llm_router=llm_router)
+
+    # ---- Message handlers ---------------------------------------- #
 
     @whatsapp_bot.on_direct_message
-    async def handle_direct(message: dict) -> str:
-        """Handle direct student messages — Q&A and on-demand calendar management."""
+    @whatsapp_bot.on_group_message
+    async def handle_message(message: dict) -> str | None:
+        """Handle ALL messages (DM and Group) via the LLM agent."""
         text = message.get("text", "")
         sender = message.get("sender_name", "Student")
+        image = _decode_image(message.get("media"))
 
-        media = message.get("media")
-        has_image = bool(media and media.get("type") == "image" and media.get("base64"))
-
-        if not text and not has_image:
-            return "Please send a question or an image to analyze! 📚"
-
-        # If direct message contains an image, check if it's a schedule/timetable or study question
-        if has_image:
-            import io
-            import PIL.Image
-            import base64 as b64mod
-            from src.agents.llm_router import llm_router
-
-            clean_b64 = media["base64"]
-            if "," in clean_b64:
-                clean_b64 = clean_b64.split(",")[1]
-            try:
-                img_bytes = b64mod.b64decode(clean_b64)
-                pil_img = PIL.Image.open(io.BytesIO(img_bytes))
-
-                # 1. Attempt to parse as timetable/schedule
-                events = await group_listener._parse_schedule(text, media)
-                if events:
-                    confirmations = []
-                    for event in events:
-                        action = event.get("action", "create")
-                        title = event.get("title", "")
-                        date_str = event.get("date")
-                        time_start = event.get("time_start")
-
-                        if action == "cancel":
-                            deleted = await calendar_sync.delete_events(query=title, date_str=date_str)
-                            if deleted:
-                                confirmations.append(f"🗑️ *Cancelled:* {', '.join(deleted)}")
-                        else:
-                            created = await calendar_sync.create_event(event)
-                            if created:
-                                time_text = f" on {date_str}" if date_str else ""
-                                if time_start:
-                                    time_text += f" at {time_start}"
-                                confirmations.append(f"• *{created.get('summary')}*{time_text}")
-                            else:
-                                confirmations.append(f"• ℹ️ *{title}* (already on calendar)")
-
-                    if confirmations:
-                        return (
-                            f"📅 *Timetable Processed & Synced to Google Calendar!*\n\n"
-                            + "\n".join(confirmations)
-                            + "\n\n🔔 Automatic reminders have been scheduled."
-                        )
-
-                # 2. Otherwise treat as academic study question
-                prompt_text = text or "Please solve or describe what is in this image, explain any concepts, or extract any key information."
-                res = await llm_router.generate(prompt_text, image=pil_img)
-                return f"🤖 {res}"
-            except Exception as img_err:
-                logger.error("Failed to process image with LLM: %s", img_err)
-                return "⚠️ Could not process the attached image. Please try again."
-
-        clean = text.strip()
-        lower = clean.lower()
-
-        # 1. Quick command shortcuts for schedule
-        if lower in ("/schedule", "/مواعيد", "schedule", "مواعيد", "جدول", "what is my schedule", "show schedule"):
-            try:
-                events = await calendar_sync.get_upcoming_events(days=30)
-                return calendar_sync.format_schedule(events)
-            except Exception as e:
-                logger.error("Calendar error: %s", e)
-                return "⚠️ Calendar error. Please verify Google Calendar credentials."
-
-        # 2. Quick command shortcuts for event deletion
-        if lower.startswith(("/delete", "/remove", "/cancel")) or any(lower.startswith(w) for w in ["delete all", "امسح كل", "احذف كل", "مسح الكل", "حذف الكل"]):
-            if lower.startswith(("/delete", "/remove", "/cancel")):
-                parts = clean.split(maxsplit=1)
-                target = parts[1].strip() if len(parts) > 1 else ""
-            else:
-                target = clean
-            if not target:
-                return "Please specify what to delete. Example: `/delete math exam` or `/delete all`"
-            try:
-                deleted = await calendar_sync.delete_events(query=target)
-                if deleted:
-                    return f"🗑️ *Deleted from Google Calendar:*\n• " + "\n• ".join(deleted)
-                return f"🔍 No upcoming calendar events matched: *{target}*"
-            except Exception as e:
-                logger.error("Calendar deletion error: %s", e)
-                return f"⚠️ Failed to delete event: {e}"
-
-        # 3. Check for natural language calendar intents (Arabic or English)
-        is_delete_intent = any(w in lower for w in [
-            "delete", "remove", "cancel", "احذف", "امسح", "الغي", "إلغاء", "شيل"
-        ]) and any(w in lower for w in [
-            "exam", "lab", "lecture", "calendar", "event", "session", "schedule", "امتحان", "سكشن", "محاضرة", "كالندر", "ميعاد", "جدول"
-        ])
-
-        if is_delete_intent:
-            try:
-                import json
-                from src.agents.llm_router import llm_router
-                extract_prompt = f"""Extract the event title or subject keyword the user wants to delete/remove from their calendar.
-User message: "{text}"
-
-Return ONLY a JSON object with:
-- "query": string (e.g. "Math Exam", "CS201", "all")
-- "date": string (ISO YYYY-MM-DD if mentioned, or null)"""
-                resp = await llm_router.generate(extract_prompt)
-                raw = resp.strip()
-                if raw.startswith("```"):
-                    raw = "\n".join([l for l in raw.splitlines() if not l.strip().startswith("```")])
-                info = json.loads(raw)
-                target = info.get("query") or text
-                deleted = await calendar_sync.delete_events(query=target, date_str=info.get("date"))
-                if deleted:
-                    return f"🗑️ *Deleted from Google Calendar:*\n• " + "\n• ".join(deleted)
-                return f"🔍 No upcoming calendar events found matching: *{target}*"
-            except Exception as e:
-                logger.warning("Intent deletion error: %s", e)
-
-        # 4. Check for natural language calendar ADD / DEADLINE intents
-        is_add_intent = (
-            any(w in lower for w in [
-                "add", "schedule", "remind", "set", "deadline", "ضيف", "سجل", "حط", "ميعاد", "تسليم", "عندي", "فكرني"
-            ])
-            and any(w in lower for w in [
-                "deadline", "exam", "lab", "lecture", "session", "assignment", "quiz", "task", "meeting", "class",
-                "تسليم", "امتحان", "كويز", "سكشن", "محاضرة", "تاسك", "ميعاد", "مشروع", "بروجكت", "next hour", "tomorrow", "كمان ساعة", "بعد ساعة"
-            ])
-        ) or bool(time_tool.resolve_relative_time_phrase(text) and any(w in lower for w in ["deadline", "exam", "lab", "task", "تسليم", "امتحان", "تاسك", "ميعاد"]))
-
-        if is_add_intent:
-            try:
-                events = await group_listener._parse_schedule(text, None)
-                if events:
-                    confirmations = []
-                    for event in events:
-                        created = await calendar_sync.create_event(event)
-                        if created:
-                            time_text = f" on {event.get('date')}" if event.get('date') else ""
-                            if event.get("time_start"):
-                                time_text += f" at {event.get('time_start')}"
-                            loc_text = f"\n📍 Location: {event.get('location')}" if event.get('location') else ""
-                            confirmations.append(
-                                f"📅 *Added to Google Calendar!*\n"
-                                f"📌 *{created.get('summary')}*\n"
-                                f"🕐 {time_text.strip()}{loc_text}\n"
-                                f"🔔 Reminders set: 1 hr & 15 mins before."
-                            )
-                        else:
-                            confirmations.append(f"ℹ️ *{event.get('title')}* is already on your calendar.")
-                    if confirmations:
-                        return "\n\n".join(confirmations)
-            except Exception as e:
-                logger.error("Direct message schedule add error: %s", e)
-
-        # 5. Standard Academic Study Assistant
-        try:
-            from src.agents.llm_router import llm_router
-            prompt = (
-                f"You are a helpful college study assistant. "
-                f"Answer the following student question concisely:\n\n{text}"
-            )
-            result = await llm_router.generate(prompt)
-            return f"🤖 {result}"
-        except Exception as e:
-            logger.error("LLM generation error: %s", e)
-            return "Sorry, I'm having trouble right now. Please try again in a moment. 🔧"
-
-    @whatsapp_bot.on_group_message
-    async def handle_group(message: dict) -> str | None:
-        """Handle group messages — parse for schedule additions or cancellations and confirm in chat."""
-        text = message.get("text", "").strip()
-        lower = text.lower()
-
-        # Check for group schedule inquiry
-        if lower in ("/schedule", "/مواعيد", "schedule", "مواعيد", "جدول", "what is my schedule", "show schedule"):
-            try:
-                events = await calendar_sync.get_upcoming_events(days=30)
-                return calendar_sync.format_schedule(events)
-            except Exception as e:
-                logger.error("Group schedule error: %s", e)
-                return "⚠️ Calendar error retrieving schedule."
-
-        # Check for group deletion command
-        if lower.startswith(("/delete", "/remove", "/cancel")) or any(lower.startswith(w) for w in ["delete all", "امسح كل", "احذف كل", "مسح الكل", "حذف الكل"]):
-            if lower.startswith(("/delete", "/remove", "/cancel")):
-                parts = text.split(maxsplit=1)
-                target = parts[1].strip() if len(parts) > 1 else ""
-            else:
-                target = text
-            try:
-                deleted = await calendar_sync.delete_events(query=target)
-                if deleted:
-                    return f"🗑️ *Deleted from Google Calendar:*\n• " + "\n• ".join(deleted)
-                return f"🔍 No calendar events matched: *{target}*"
-            except Exception as e:
-                logger.error("Group calendar deletion error: %s", e)
-                return f"⚠️ Failed to delete event: {e}"
-
-        events = await group_listener.handle_group_message(message)
-        if not events:
+        if not text and not image:
+            logger.info("Message from %s: empty, ignoring", sender)
             return None
 
-        confirmations = []
-        for event in events:
-            action = event.get("action", "create")
-            title = event.get("title", "")
-            date_str = event.get("date")
-            time_start = event.get("time_start")
-            location = event.get("location")
+        # Route ALL messages through the tool-calling agent
+        return await process_message(text, image)
 
-            try:
-                if action == "cancel":
-                    deleted = await calendar_sync.delete_events(query=title, date_str=date_str)
-                    if deleted:
-                        confirmations.append(
-                            f"🗑️ *Cancelled & Removed from Google Calendar:*\n• " + "\n• ".join(deleted)
-                        )
-                    else:
-                        confirmations.append(
-                            f"⚠️ Cancellation noted for *{title}*, but no matching event was found on your calendar."
-                        )
-                else:
-                    created = await calendar_sync.create_event(event)
-                    if created:
-                        time_text = f" on {date_str}" if date_str else ""
-                        if time_start:
-                            time_text += f" at {time_start}"
-                        loc_text = f"\n📍 Location: {location}" if location else ""
-                        confirmations.append(
-                            f"📅 *Added to Google Calendar!*\n"
-                            f"📌 *{created.get('summary')}*\n"
-                            f"🕐 {time_text.strip()}{loc_text}\n"
-                            f"🔔 Reminders set: 1 hr & 15 mins before."
-                        )
-                    else:
-                        confirmations.append(f"ℹ️ *{title}* is already on your calendar for this date.")
-            except Exception as e:
-                logger.error("Failed to process announcement event '%s': %s", title, e)
 
-        if confirmations:
-            return "\n\n".join(confirmations)
-        return None
-
-    # ---- Configure webhook on Evolution API with retry loop ---- #
-    import asyncio
+    # ---- Configure webhook on Evolution API with retry loop ------ #
     api_port = os.getenv("API_PORT", "8000")
     webhook_url = os.getenv("WEBHOOK_URL", f"http://python-backend:{api_port}/webhook")
 
-    max_retries = 15
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, 16):
         try:
             state = await evolution_client.get_connection_state()
             logger.info("WhatsApp connection state: %s", state)
@@ -348,17 +162,14 @@ Return ONLY a JSON object with:
             logger.info("✅ Evolution API webhook configured: %s", webhook_url)
             break
         except Exception as e:
-            if attempt == max_retries:
-                logger.error("❌ Failed to configure Evolution API webhook after %d attempts: %s", max_retries, e)
+            if attempt == 15:
+                logger.error("❌ Failed to configure webhook after 15 attempts: %s", e)
             else:
-                logger.warning("Waiting for Evolution API (attempt %d/%d): %s", attempt, max_retries, e)
+                logger.warning("Waiting for Evolution API (attempt %d/15): %s", attempt, e)
                 await asyncio.sleep(2)
 
     logger.info("✅ College Assistant AI ready!")
-
-    yield  # App is running
-
-    # Shutdown
+    yield
     logger.info("Shutting down...")
     if evolution_client:
         await evolution_client.close()
@@ -382,50 +193,28 @@ app = FastAPI(
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    """
-    Receive incoming messages from Evolution API.
-
-    Evolution API forwards WhatsApp events (messages, connection updates)
-    to this endpoint as JSON payloads.
-    """
+    """Receive incoming messages from Evolution API."""
     try:
         payload = await request.json()
     except Exception:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
+    logger.debug("Webhook payload: event=%s", payload.get("event"))
+
     if whatsapp_bot:
-        # Process in background (don't block the webhook response)
-        import asyncio
         asyncio.create_task(whatsapp_bot.handle_webhook(payload))
 
-    # Must return 200 quickly to avoid Evolution API retry
     return {"status": "received"}
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query(request: QueryRequest):
-    """
-    Direct query endpoint for testing without WhatsApp.
-
-    Send a question and get an AI response with sources.
-    """
+async def query(req: QueryRequest):
+    """Direct query endpoint for testing without WhatsApp."""
     try:
-        from src.agents.llm_router import llm_router
-        ans = await llm_router.generate(
-            f"You are a helpful college study assistant. "
-            f"Answer the following question concisely:\n\n{request.question}"
-        )
-        return QueryResponse(
-            answer=ans,
-            confidence=0.8,
-            sources=[],
-        )
+        answer = await process_message(req.question)
+        return QueryResponse(answer=answer, confidence=0.8, sources=[])
     except Exception as e:
-        return QueryResponse(
-            answer=f"Error: {str(e)}",
-            confidence=0.0,
-            sources=[],
-        )
+        return QueryResponse(answer=f"Error: {e}", confidence=0.0, sources=[])
 
 
 @app.get("/schedule", response_model=ScheduleResponse)
@@ -433,54 +222,40 @@ async def get_schedule(days: int = 7):
     """Get upcoming calendar events for the next N days."""
     if not calendar_sync:
         return ScheduleResponse(formatted="Calendar not initialized")
-
     try:
         events = await calendar_sync.get_upcoming_events(days=days)
-        formatted = calendar_sync.format_schedule(events)
-        return ScheduleResponse(events=events, formatted=formatted)
+        return ScheduleResponse(events=events, formatted=calendar_sync.format_schedule(events))
     except Exception as e:
-        return ScheduleResponse(formatted=f"Error: {str(e)}")
+        return ScheduleResponse(formatted=f"Error: {e}")
 
 
 @app.post("/schedule/delete", response_model=DeleteEventResponse)
-async def delete_schedule_event(request: DeleteEventRequest):
+async def delete_schedule_event(req: DeleteEventRequest):
     """Delete calendar events matching query keyword and optional date."""
     if not calendar_sync:
         return DeleteEventResponse(message="Calendar not initialized")
-
     try:
-        deleted = await calendar_sync.delete_events(query=request.query, date_str=request.date)
+        deleted = await calendar_sync.delete_events(query=req.query, date_str=req.date)
         if deleted:
             return DeleteEventResponse(
                 deleted_events=deleted,
                 message=f"Successfully deleted {len(deleted)} event(s): {', '.join(deleted)}",
             )
-        return DeleteEventResponse(
-            deleted_events=[],
-            message=f"No upcoming events found matching '{request.query}'.",
-        )
+        return DeleteEventResponse(deleted_events=[], message=f"No upcoming events found matching '{req.query}'.")
     except Exception as e:
-        return DeleteEventResponse(deleted_events=[], message=f"Error deleting event: {str(e)}")
+        return DeleteEventResponse(deleted_events=[], message=f"Error deleting event: {e}")
 
 
 @app.get("/groups")
 async def list_groups():
-    """
-    List all WhatsApp groups the bot is part of.
-    Use this to find the JID of the announcement group.
-    """
+    """List all WhatsApp groups the bot is part of."""
     if not evolution_client:
         return {"error": "Evolution API not connected"}
-
     try:
         groups = await evolution_client.fetch_all_groups()
         return {
             "groups": [
-                {
-                    "jid": g.get("id", ""),
-                    "name": g.get("subject", "Unknown"),
-                    "size": g.get("size", 0),
-                }
+                {"jid": g.get("id", ""), "name": g.get("subject", "Unknown"), "size": g.get("size", 0)}
                 for g in groups
             ]
         }
@@ -498,7 +273,6 @@ async def qr_json():
         state = conn.get("instance", {}).get("state", "")
         if state == "open":
             return {"state": "open", "connected": True}
-
         qr_data = await evolution_client.get_qr_code()
         return {
             "state": state,
@@ -562,11 +336,15 @@ async def qr_page():
         qr_data = await evolution_client.get_qr_code()
         b64 = qr_data.get("base64", "")
         pairing_code = qr_data.get("pairingCode", "")
-    except Exception as e:
-        b64 = ""
-        pairing_code = ""
+    except Exception:
+        b64, pairing_code = "", ""
 
-    pairing_html = f"<div style='margin-top:16px; background:#f1f5f9; padding:10px 16px; border-radius:8px;'><b>Pairing Code:</b> <code style='font-size:18px; color:#0f172a;'>{pairing_code}</code></div>" if pairing_code else ""
+    pairing_html = (
+        f"<div style='margin-top:16px; background:#f1f5f9; padding:10px 16px; border-radius:8px;'>"
+        f"<b>Pairing Code:</b> <code style='font-size:18px; color:#0f172a;'>{pairing_code}</code></div>"
+        if pairing_code
+        else ""
+    )
 
     return f"""
     <!DOCTYPE html>
@@ -621,17 +399,12 @@ async def qr_page():
             const connectingView = document.getElementById('connecting-view');
             const connectedView = document.getElementById('connected-view');
 
-            // Countdown timer
             setInterval(() => {{
                 timeLeft--;
                 if (countdownEl) countdownEl.innerText = timeLeft;
-                if (timeLeft <= 0) {{
-                    fetchQR();
-                    timeLeft = 35;
-                }}
+                if (timeLeft <= 0) {{ fetchQR(); timeLeft = 35; }}
             }}, 1000);
 
-            // Fast connection checker (every 2.5s)
             setInterval(async () => {{
                 try {{
                     const res = await fetch('/health');
@@ -662,12 +435,8 @@ async def qr_page():
                 try {{
                     const res = await fetch('/qr/reset', {{ method: 'POST' }});
                     const data = await res.json();
-                    if (data.base64) {{
-                        qrImg.src = data.base64;
-                    }}
-                }} catch (e) {{
-                    fetchQR();
-                }}
+                    if (data.base64) {{ qrImg.src = data.base64; }}
+                }} catch (e) {{ fetchQR(); }}
             }}
         </script>
     </body>
@@ -693,7 +462,4 @@ async def health():
     except Exception as e:
         logger.error("Health check error: %s", e)
 
-    return HealthResponse(
-        status="ok",
-        whatsapp_connected=wa_connected,
-    )
+    return HealthResponse(status="ok", whatsapp_connected=wa_connected)
