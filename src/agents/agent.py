@@ -14,9 +14,10 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.agents.llm_router import extract_text_from_content, llm_router, optimize_and_encode_image
+from src.agents.memory import memory
 from src.agents.tools import ALL_TOOLS, clear_current_image, set_current_image
 from src.tools.time_tool import time_tool
 
@@ -33,24 +34,24 @@ TOOL_MAP: dict = {t.name: t for t in ALL_TOOLS}
 # System prompt injected into every agent call
 # ------------------------------------------------------------------ #
 SYSTEM_PROMPT = """\
-You are a helpful college assistant WhatsApp bot that helps students manage \
+You are an intelligent autonomous college assistant WhatsApp bot that helps students manage \
 their academic schedule and answer study questions.
 
 Available tools:
 • view_schedule        — show upcoming calendar events from Google Calendar
-• add_calendar_event   — add an exam / lecture / lab / deadline to Google Calendar
+• add_calendar_event   — add an exam / lecture / lab / deadline / announcement date to Google Calendar
 • delete_calendar_event— delete or cancel calendar events from Google Calendar
 • parse_timetable_image— parse a timetable or schedule image and sync to calendar
 
 RULES:
 1. ALWAYS use tools for calendar events — never answer schedule questions from memory.
-2. For schedule queries → view_schedule.
-3. For add / remind / set deadline → add_calendar_event.
-4. For delete / remove / cancel → delete_calendar_event.
-5. If the user sends an image that is a timetable / exam schedule → parse_timetable_image.
-6. For ALL academic questions, study help, explanations, general questions, and greetings → ANSWER DIRECTLY in your text response (do not invoke tools).
-7. If the user sends an image with a question, inspect the image and ANSWER DIRECTLY in your response.
-8. Support both Arabic and English naturally.
+2. For schedule queries (show / what's next / my schedule) → view_schedule.
+3. For add / remind / set deadline / save exam date → add_calendar_event.
+4. For delete / remove / cancel / امسح / احذف → ALWAYS use delete_calendar_event. NEVER call view_schedule for a delete request. If vague like "delete this", call delete_calendar_event with query='all'.
+5. ANNOUNCEMENTS & IMAGES WITH DATES/DEADLINES: When a student sends an image or text containing an announcement, exam date, lecture schedule, or deadline, YOU MUST CALL a calendar tool (`add_calendar_event` or `parse_timetable_image`) to add it to Google Calendar! After tool execution, confirm to the student what you added and summarize the announcement.
+6. MULTI-STEP AGENT: You can call multiple tools in sequence (e.g. view schedule first, then delete or add events) to complete complex user requests.
+7. For purely academic questions, study help, explanations, general questions, and greetings → ANSWER DIRECTLY in your text response (do not invoke tools unless calendar action is needed).
+8. Support both Arabic and English naturally. Match the language of the user's message.
 9. When adding events, calculate correct dates using the CURRENT TIME below.
 10. For relative times (e.g. "next hour", "tomorrow", "كمان ساعة", "بكرة") compute the exact date/time.
 
@@ -62,12 +63,13 @@ RULES:
 # ------------------------------------------------------------------ #
 
 
-async def process_message(text: str, image: Any | None = None) -> str:
+async def process_message(text: str, image: Any | None = None, user_id: str = "") -> str:
     """Route a student's message through the LLM agent with tool-calling.
 
     Args:
-        text:  Message text (may be empty if image-only).
-        image: Optional *PIL.Image* for multimodal messages.
+        text:    Message text (may be empty if image-only).
+        image:   Optional *PIL.Image* for multimodal messages.
+        user_id: JID of the sender (used for conversation memory).
 
     Returns:
         A formatted response string ready to send back via WhatsApp.
@@ -78,17 +80,25 @@ async def process_message(text: str, image: Any | None = None) -> str:
     logger.info("┌─ AGENT START ─────────────────────────────────────")
     logger.info("│ Input text : '%s'", text_preview or "(none)")
     logger.info("│ Has image  : %s", image is not None)
+    logger.info("│ User ID    : %s", user_id[:25] if user_id else "(none)")
 
     # Store image so tools can access it
     if image:
         set_current_image(image)
 
     try:
-        result = await _run_agent(text, image)
+        result = await _run_agent(text, image, user_id)
         elapsed = time.monotonic() - t0
         result_preview = (result[:150] + "…") if len(result) > 150 else result
         logger.info("│ Final response (%d chars, %.1fs): '%s'", len(result), elapsed, result_preview)
         logger.info("└─ AGENT END ───────────────────────────────────────")
+
+        # Save conversation turn to memory
+        if user_id:
+            user_content = text or "(image)"
+            await memory.add_message(user_id, "user", user_content)
+            await memory.add_message(user_id, "assistant", result)
+
         return result
     except Exception as e:
         elapsed = time.monotonic() - t0
@@ -106,8 +116,8 @@ async def process_message(text: str, image: Any | None = None) -> str:
 # ------------------------------------------------------------------ #
 
 
-async def _run_agent(text: str, image: Any | None) -> str:
-    """Build the model, send the message, execute any tool calls."""
+async def _run_agent(text: str, image: Any | None, user_id: str = "") -> str:
+    """Build the model, send the message, execute any tool calls in an agentic loop."""
     # ---- messages ------------------------------------------------ #
     time_context = time_tool.get_time_context_prompt()
     system = SystemMessage(content=SYSTEM_PROMPT.format(time_context=time_context))
@@ -115,7 +125,7 @@ async def _run_agent(text: str, image: Any | None) -> str:
     if image:
         img_url = optimize_and_encode_image(image)
         content = [
-            {"type": "text", "text": text or "Please analyze this image."},
+            {"type": "text", "text": text or "Please analyze this image and take appropriate calendar actions if needed."},
             {"type": "image_url", "image_url": {"url": img_url}},
         ]
         human = HumanMessage(content=content)
@@ -124,64 +134,85 @@ async def _run_agent(text: str, image: Any | None) -> str:
         human = HumanMessage(content=text)
         logger.info("│ Sending    : text only")
 
-    messages = [system, human]
+    # ---- inject conversation history ----------------------------- #
+    history_msgs = []
+    if user_id:
+        history = memory.get_history(user_id)
+        for entry in history:
+            if entry["role"] == "user":
+                history_msgs.append(HumanMessage(content=entry["content"]))
+            else:
+                history_msgs.append(AIMessage(content=entry["content"]))
+        if history_msgs:
+            logger.info("│ Memory     : %d past messages for %s", len(history_msgs), user_id[:25])
 
-    # ---- call model with fallbacks via unified router ------------- #
-    response, llm_ms = await llm_router.invoke_agent(
-        messages=messages,
-        tools=ALL_TOOLS,
-        has_image=(image is not None),
-    )
+    messages: list[BaseMessage] = [system, *history_msgs, human]
+    max_iterations = 5
+    executed_results: list[str] = []
 
-    tool_names = [tc["name"] for tc in response.tool_calls] if response.tool_calls else []
+    for iteration in range(1, max_iterations + 1):
+        logger.info("│ 🔄 AGENT LOOP iteration %d/%d", iteration, max_iterations)
 
-    if tool_names:
-        logger.info("│ LLM decided (%.0fms): TOOL CALL → %s", llm_ms, tool_names)
-    elif response.content:
-        logger.info("│ LLM decided (%.0fms): DIRECT RESPONSE (%d chars)", llm_ms, len(str(response.content)))
-    else:
-        logger.info("│ LLM decided (%.0fms): EMPTY RESPONSE", llm_ms)
+        response, llm_ms = await llm_router.invoke_agent(
+            messages=messages,
+            tools=ALL_TOOLS,
+            has_image=(image is not None),
+        )
 
-    # ---- execute tool calls -------------------------------------- #
-    if response.tool_calls:
-        results: list[str] = []
-        for i, tc in enumerate(response.tool_calls, 1):
-            name, args = tc["name"], tc["args"]
-            
-            # --- HIGH VISIBILITY TOOL LOGGING ---
+        tool_calls = getattr(response, "tool_calls", None) or []
+        tool_names = [tc["name"] for tc in tool_calls] if tool_calls else []
+
+        if tool_names:
+            logger.info("│ LLM decided (%.0fms): TOOL CALL → %s", llm_ms, tool_names)
+        elif response.content:
+            logger.info("│ LLM decided (%.0fms): DIRECT RESPONSE (%d chars)", llm_ms, len(str(response.content)))
+        else:
+            logger.info("│ LLM decided (%.0fms): EMPTY RESPONSE", llm_ms)
+
+        # ---- case 1: no tool calls -> final response from model ---- #
+        if not tool_calls:
+            final_text = extract_text_from_content(response.content)
+            if final_text:
+                return final_text
+            if executed_results:
+                return "\n\n".join(executed_results)
+            return "I'm not sure how to help with that. Try asking a question or managing your schedule! 📚"
+
+        # ---- case 2: tool calls requested -> execute & feed back ---- #
+        messages.append(response)
+
+        for i, tc in enumerate(tool_calls, 1):
+            name = tc["name"]
+            args = tc.get("args", {})
+            call_id = tc.get("id") or f"call_{iteration}_{i}"
+
             logger.info("│")
-            logger.info("│ 🛠️  TOOL CALL [%d/%d] : %s", i, len(response.tool_calls), name.upper())
+            logger.info("│ 🛠️  TOOL CALL [%d/%d] : %s", i, len(tool_calls), name.upper())
             logger.info("│ 📦 ARGUMENTS : %s", args)
-            
+
             tool_fn = TOOL_MAP.get(name)
             if not tool_fn:
                 logger.error("│ ❌ UNKNOWN TOOL: %s", name)
-                results.append(f"⚠️ Unknown action: {name}")
-                continue
+                res_str = f"⚠️ Unknown action: {name}"
+            else:
+                try:
+                    t_tool = time.monotonic()
+                    res_raw = await tool_fn.ainvoke(args)
+                    tool_ms = (time.monotonic() - t_tool) * 1000
+                    res_str = str(res_raw)
+                    preview = (res_str[:120] + "…") if len(res_str) > 120 else res_str
+                    logger.info("│ ✅ RESULT (%.0fms): %s", tool_ms, preview)
+                    logger.info("│")
+                except Exception as tool_err:
+                    logger.error("│ ❌ FAILED: %s", tool_err)
+                    res_str = f"⚠️ {name} error: {tool_err}"
 
-            try:
-                t_tool = time.monotonic()
-                result = await tool_fn.ainvoke(args)
-                tool_ms = (time.monotonic() - t_tool) * 1000
-                result_str = str(result)
-                result_preview = (result_str[:120] + "…") if len(result_str) > 120 else result_str
-                
-                logger.info("│ ✅ RESULT (%.0fms): %s", tool_ms, result_preview)
-                logger.info("│")
-                
-                results.append(result_str)
-            except Exception as tool_err:
-                logger.error("│ ❌ FAILED: %s", tool_err)
-                results.append(f"⚠️ {name} error: {tool_err}")
+            executed_results.append(res_str)
+            messages.append(ToolMessage(content=res_str, tool_call_id=call_id))
 
-        return "\n\n".join(results)
-
-    # ---- no tool calls — direct model response ------------------- #
-    if response.content:
-        final_text = extract_text_from_content(response.content)
-        return final_text if final_text else "I'm not sure how to help with that. 📚"
-
-    return "I'm not sure how to help with that. Try asking a question or managing your schedule! 📚"
+    if executed_results:
+        return "\n\n".join(executed_results)
+    return "I completed the requested actions. 📚"
 
 
 async def _fallback(text: str) -> str:

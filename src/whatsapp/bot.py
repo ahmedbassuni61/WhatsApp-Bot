@@ -32,6 +32,8 @@ class WhatsAppBot:
         # Callbacks for processing messages (will be set by the app)
         self._on_direct_message = None
         self._on_group_message = None
+        # Message dedup: prevent double-processing when Evolution API retries
+        self._seen_message_ids: set[str] = set()
 
     def on_direct_message(self, handler):
         """Register a handler for direct (1:1) messages."""
@@ -88,6 +90,20 @@ class WhatsAppBot:
         if remote_jid == "status@broadcast":
             logger.debug("Skipping status broadcast")
             return
+
+        # Deduplicate: skip if we already processed this message ID
+        msg_id = key.get("id", "")
+        if msg_id:
+            if msg_id in self._seen_message_ids:
+                logger.debug("Skipping duplicate message: %s", msg_id[:20])
+                return
+            self._seen_message_ids.add(msg_id)
+            # Bound the set so it doesn't grow forever
+            if len(self._seen_message_ids) > 500:
+                # Discard ~half the oldest entries (sets are unordered, but
+                # this prevents unbounded growth while keeping recent IDs)
+                to_remove = list(self._seen_message_ids)[:250]
+                self._seen_message_ids -= set(to_remove)
 
         # Signal typing indicator immediately so user gets feedback even while media is downloading
         try:

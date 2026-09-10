@@ -1,0 +1,46 @@
+{
+  "120363410586240165@g.us": [
+    {
+      "role": "user",
+      "content": "delete this from calander"
+    },
+    {
+      "role": "assistant",
+      "content": "🔍 No upcoming calendar events matched: *سحب*"
+    }
+  ],
+  "201280500875@s.whatsapp.net": [
+    {
+      "role": "user",
+      "content": "(image)"
+    },
+    {
+      "role": "assistant",
+      "content": "هذه الصورة عبارة عن لقطة شاشة (Screenshot) لرسالة مرسلة من **د. نهى قرني (Dr. Noha Korany)** في تمام الساعة **6:39 مساءً**.\n\n**مضمون الرسالة:**\nتعلن الدكتورة عن آخر موعد لسحب المقررات الدراسية للفصل الدراسي الصيفي الحالي. \n* **الإجراء المطلوب:** الحضور لتسليم استمارة السحب لمن يرغب في ذلك.\n* **الموعد المحدد:** غداً الخميس، **20 أغسطس** في تمام الساعة **10:30 صباحاً**.\n\n---\n\nThis image is a screenshot of a message from **Dr. Noha Korany** sent at **6:39 PM**.\n\n**Message Details:**\n* **Subject:** The deadline for course withdrawal for the current summer semester.\n* **Action:** For those who wish to submit the withdrawal form in person.\n* **Deadline:** Tomorrow, Thursday, **August 20th** at **10:30 AM**."
+    },
+    {
+      "role": "user",
+      "content": "ما هي اخر رساله"
+    },
+    {
+      "role": "assistant",
+      "content": "آخر رسالة في الصورة هي من **د. نهى قرني**، ونصها كالتالي:\n\n> \"تعلن د. نهى قرني أن غداً الخميس ٢٠ أغسطس الساعة ١٠:٣٠ ص هو آخر موعد لسحب المقررات الصيفية لمن يرغب في الحضور لتسليم استمارة السحب.\""
+    },
+    {
+      "role": "user",
+      "content": "اضف الdeadline من اخر رساله"
+    },
+    {
+      "role": "assistant",
+      "content": "📅 *Added to Google Calendar!*\n📌 *[DEADLINE] آخر موعد لسحب المقررات الصيفية*\n🕐 on 2026-08-20 at 10:30\n🔔 Reminders set: 1 hr & 15 mins before."
+    },
+    {
+      "role": "user",
+      "content": "check deadlines from 15/8 to 20/8 and delete them"
+    },
+    {
+      "role": "assistant",
+      "content": "تم حذف جميع الفعاليات والمواعيد النهائية (Deadlines) المسجلة في الفترة من 15/8 إلى 20/8 بنجاح من التقويم الخاص بك."
+    }
+  ]
+}

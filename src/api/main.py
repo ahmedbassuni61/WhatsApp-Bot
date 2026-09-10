@@ -137,6 +137,7 @@ async def lifespan(app: FastAPI):
         """Handle ALL messages (DM and Group) via the LLM agent."""
         text = message.get("text", "")
         sender = message.get("sender_name", "Student")
+        jid = message.get("jid", "")
         image = _decode_image(message.get("media"))
 
         if not text and not image:
@@ -144,7 +145,7 @@ async def lifespan(app: FastAPI):
             return None
 
         # Route ALL messages through the tool-calling agent
-        return await process_message(text, image)
+        return await process_message(text, image, user_id=jid)
 
 
     # ---- Configure webhook on Evolution API with retry loop ------ #
