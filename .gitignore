@@ -1,5 +1,6 @@
 # Python
 .venv/
+.pytest_cache/
 __pycache__/
 *.pyc
 *.pyo
@@ -10,7 +11,7 @@ build/
 
 # Data & databases
 chroma_db/
-data/images/
+data/
 *.db
 
 # Environment & Secrets
