@@ -17,15 +17,16 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
 - **Intelligent Deletion**: Supports natural language deletion (`/delete math`, `احذف امتحان الرياضيات`) and bulk clearing (`delete all exam schedule`) with cross-language subject aliases and LLM fallback.
 - **Instant Schedule Query**: Check upcoming exams anytime with `/schedule` or `جدول`.
 
-### ⚡ Resilient Multi-LLM Router (`src/agents/llm_router.py`)
-- **Automatic Failover**: Seamlessly switches between Google Gemini (`gemini-2.5-flash-lite`, `gemini-flash-latest`, `gemini-3.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `qwen/qwen3.8-27b`, `allam-2-7b`).
-- **Quota Protection**: Prioritizes Gemini Flash Lite (1,500 requests/day, multimodal vision) to eliminate Google AI Studio 429 quota exhaustion.
+### ⚡ Unified Multi-LLM Gateway (`src/agents/llm_router.py`)
+- **Single-Inference Responses**: General study questions, concept explanations, and homework help are answered directly in a single LLM pass (~1.2s), cutting API calls and latency in half.
+- **Automatic Quota Failover**: Seamlessly fails over across Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
+- **Model Caching & Optimization**: Pre-caches model connections in memory and automatically downscales/compresses camera images from 10MB+ down to ~100KB JPEG before sending to the model.
 - **Combined Capacity**: ~3,500+ free queries per day across providers.
 
-### 📱 WhatsApp Gateway (Evolution API v2)
+### 📱 WhatsApp Gateway & Real-Time Presence
 - **Zero-Chromium Architecture**: Built on Dockerized Evolution API v2 wrapping the Baileys WebSocket protocol.
 - **Interactive Browser Pairing**: Scan the QR code at `http://localhost:8000/qr` with real-time status detection, auto-timer, and one-click refresh.
-- **Humanized Anti-Ban Presence**: Automated typing indicators (`composing`) with randomized jitter delays (1.5s - 4.0s).
+- **Synchronized Typing Presence**: WhatsApp `composing` indicator starts immediately upon message arrival, giving natural visual feedback while the model processes, and replies are dispatched instantly with zero artificial delay.
 
 ### 📚 Multi-Source RAG & LangGraph Reasoning *(In Progress)*
 - **Data Ingestion**: Process lecture PDFs, extract textbook diagrams, and transcribe lecture audio/video with local Whisper.
@@ -130,8 +131,10 @@ WhatsApp-bot/
 │   ├── SETUP_GUIDE.md        # Comprehensive local & cloud setup walkthrough
 │   └── TECH_STACK.md         # Detailed breakdown of zero-cost technologies
 ├── src/
-│   ├── agents/               # LLM router and LangGraph agents
-│   │   └── llm_router.py     # Gemini + Groq multi-LLM failover router
+│   ├── agents/               # LLM router, tool calling, and agent reasoning
+│   │   ├── agent.py          # Message orchestration & single-inference answering
+│   │   ├── llm_router.py     # Unified Gemini + Groq gateway with model caching
+│   │   └── tools.py          # Google Calendar tools & timetable image parser
 │   ├── api/                  # FastAPI web server and routes
 │   │   ├── main.py           # Webhook receiver, /qr dashboard, /schedule API
 │   │   └── models.py         # Pydantic schemas
@@ -139,15 +142,26 @@ WhatsApp-bot/
 │   ├── export/               # Answer-to-image and PDF export
 │   ├── ingestion/            # PDF, audio, and video RAG processors
 │   ├── retrieval/            # Multi-collection semantic search
+│   ├── tests/                # Automated unit tests (pytest)
+│   │   ├── test_llm_router.py# LLMRouter failover and model tests
+│   │   └── test_time_tool.py # Timezone and relative time tests
+│   ├── tools/                # General utility tools (timezone/dates)
 │   └── whatsapp/             # WhatsApp integration
-│       ├── bot.py            # Message routing & anti-ban typing delay
-│       ├── calendar_sync.py  # Google Calendar sync, multi-user, delete engine
+│       ├── bot.py            # Message routing & synchronized typing presence
+│       ├── calendar_sync.py  # Non-blocking Google Calendar sync & delete engine
 │       ├── evolution_client.py # Evolution API v2 async REST client
 │       └── group_listener.py # Multimodal announcement & timetable parser
 ├── docker-compose.yml        # Multi-container orchestration
-├── Dockerfile                # Python backend container
+├── Dockerfile                # Python backend container (with pytest)
+├── pyproject.toml            # Project metadata & pytest configuration
 ├── requirements.txt          # Python dependencies
 └── setup_calendar.py         # Google Calendar OAuth initialization
+```
+
+### 🧪 Automated Testing
+Run the comprehensive test suite locally or inside Docker:
+```bash
+pytest -v
 ```
 
 ---

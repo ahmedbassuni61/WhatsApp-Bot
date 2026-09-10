@@ -13,6 +13,7 @@ Setup:
 4. On first run, a browser window opens for authorization → saves token.json
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
@@ -83,7 +84,7 @@ class CalendarSync:
                 )
             raise RuntimeError("Invalid Google Calendar credentials. Please re-run 'python setup_calendar.py'.")
 
-        self._service = build("calendar", "v3", credentials=creds)
+        self._service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return self._service
 
     async def create_event(self, event_data: dict) -> dict | None:
@@ -161,10 +162,12 @@ class CalendarSync:
 
         # Create the event
         try:
-            created = service.events().insert(
-                calendarId=self.calendar_id,
-                body=event_body,
-            ).execute()
+            created = await asyncio.to_thread(
+                service.events().insert(
+                    calendarId=self.calendar_id,
+                    body=event_body,
+                ).execute
+            )
 
             logger.info(
                 "Calendar event created: '%s' on %s — %s",
@@ -205,14 +208,16 @@ class CalendarSync:
         time_max = (now + timedelta(days=days)).isoformat() + "Z"
 
         try:
-            result = service.events().list(
-                calendarId=self.calendar_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
-            ).execute()
+            result = await asyncio.to_thread(
+                service.events().list(
+                    calendarId=self.calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute
+            )
 
             events = result.get("items", [])
 
@@ -273,13 +278,15 @@ class CalendarSync:
         time_max = f"{date_str}T23:59:59Z"
 
         try:
-            result = service.events().list(
-                calendarId=self.calendar_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                singleEvents=True,
-                q=title,  # Search by title
-            ).execute()
+            result = await asyncio.to_thread(
+                service.events().list(
+                    calendarId=self.calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    q=title,  # Search by title
+                ).execute
+            )
 
             existing = result.get("items", [])
             # If any event on the same day has a similar title, it's a duplicate
@@ -319,7 +326,7 @@ class CalendarSync:
             params["q"] = query
 
         try:
-            result = service.events().list(**params).execute()
+            result = await asyncio.to_thread(service.events().list(**params).execute)
             matched_items = result.get("items", [])
 
             if not matched_items:
@@ -331,10 +338,12 @@ class CalendarSync:
                 summary = item.get("summary", "Untitled")
                 event_id = item.get("id")
                 try:
-                    service.events().delete(
-                        calendarId=self.calendar_id,
-                        eventId=event_id,
-                    ).execute()
+                    await asyncio.to_thread(
+                        service.events().delete(
+                            calendarId=self.calendar_id,
+                            eventId=event_id,
+                        ).execute
+                    )
                     deleted.append(summary)
                     logger.info("Deleted calendar event: '%s' (ID: %s)", summary, event_id)
                 except Exception as del_err:

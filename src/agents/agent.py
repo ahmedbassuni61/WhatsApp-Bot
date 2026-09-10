@@ -10,14 +10,13 @@ to invoke.  If all providers fail, a basic text fallback is attempted.
 import base64 as b64mod
 import io
 import logging
-import os
 import time
 from typing import Any
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
+from src.agents.llm_router import extract_text_from_content, llm_router, optimize_and_encode_image
 from src.agents.tools import ALL_TOOLS, clear_current_image, set_current_image
 from src.tools.time_tool import time_tool
 
@@ -38,21 +37,20 @@ You are a helpful college assistant WhatsApp bot that helps students manage \
 their academic schedule and answer study questions.
 
 Available tools:
-• view_schedule        — show upcoming calendar events
+• view_schedule        — show upcoming calendar events from Google Calendar
 • add_calendar_event   — add an exam / lecture / lab / deadline to Google Calendar
-• delete_calendar_event— delete or cancel calendar events
-• answer_question      — answer academic / study questions
+• delete_calendar_event— delete or cancel calendar events from Google Calendar
 • parse_timetable_image— parse a timetable or schedule image and sync to calendar
 
 RULES:
-1. ALWAYS use the appropriate tool — never answer schedule questions from memory.
+1. ALWAYS use tools for calendar events — never answer schedule questions from memory.
 2. For schedule queries → view_schedule.
 3. For add / remind / set deadline → add_calendar_event.
 4. For delete / remove / cancel → delete_calendar_event.
-5. If the user sends an image that looks like a timetable → parse_timetable_image.
-6. If the user sends an image with a study/homework question → answer_question (the image is included automatically).
-7. For any other academic question → answer_question.
-8. Support both Arabic and English.
+5. If the user sends an image that is a timetable / exam schedule → parse_timetable_image.
+6. For ALL academic questions, study help, explanations, general questions, and greetings → ANSWER DIRECTLY in your text response (do not invoke tools).
+7. If the user sends an image with a question, inspect the image and ANSWER DIRECTLY in your response.
+8. Support both Arabic and English naturally.
 9. When adding events, calculate correct dates using the CURRENT TIME below.
 10. For relative times (e.g. "next hour", "tomorrow", "كمان ساعة", "بكرة") compute the exact date/time.
 
@@ -110,87 +108,37 @@ async def process_message(text: str, image: Any | None = None) -> str:
 
 async def _run_agent(text: str, image: Any | None) -> str:
     """Build the model, send the message, execute any tool calls."""
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    try:
-        from langchain_groq import ChatGroq
-    except ImportError:
-        ChatGroq = None
-
     # ---- messages ------------------------------------------------ #
     time_context = time_tool.get_time_context_prompt()
     system = SystemMessage(content=SYSTEM_PROMPT.format(time_context=time_context))
 
     if image:
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        b64_str = b64mod.b64encode(buf.getvalue()).decode()
+        img_url = optimize_and_encode_image(image)
         content = [
             {"type": "text", "text": text or "Please analyze this image."},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_str}"}},
+            {"type": "image_url", "image_url": {"url": img_url}},
         ]
         human = HumanMessage(content=content)
-        logger.info("│ Sending    : text + image (%d bytes PNG)", len(buf.getvalue()))
+        logger.info("│ Sending    : text + compressed image (%d chars)", len(img_url))
     else:
         human = HumanMessage(content=text)
         logger.info("│ Sending    : text only")
 
     messages = [system, human]
 
-    # ---- LLM Failover Setup -------------------------------------- #
-    models_to_try = []
-    
-    # 1. Primary: Gemini
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
-        models_to_try.extend([
-            ("Gemini 3.5 Flash", ChatGoogleGenerativeAI(model="gemini-3.5-flash", google_api_key=gemini_key, temperature=0.3)),
-            ("Gemini 3.5 Flash Lite", ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key=gemini_key, temperature=0.3)),
-            ("Gemini 2.5 Flash", ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=gemini_key, temperature=0.3)),
-            ("Gemini 2.5 Flash Lite", ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", google_api_key=gemini_key, temperature=0.3)),
-        ])
-    
-    # 2. Secondary: Groq (only if no image, as Groq vision tool calling is limited)
-    groq_key = os.getenv("GROQ_API_KEY")
-    if not image and groq_key and ChatGroq:
-        models_to_try.extend([
-            ("Groq", ChatGroq(model="llama-3.3-70b-versatile", groq_api_key=groq_key, temperature=0.3)),
-            ("Groq (Fallback)", ChatGroq(model="mixtral-8x7b-32768", groq_api_key=groq_key, temperature=0.3)),
-        ])
-
-    if not models_to_try:
-        raise RuntimeError("No LLM API keys configured for the agent.")
-
-    # ---- call model with fallbacks ------------------------------- #
-    response = None
-    llm_ms = 0
-    t_llm = time.monotonic()
-
-    for name, model in models_to_try:
-        try:
-            logger.info("│ Trying LLM : %s...", name)
-            model_with_tools = model.bind_tools(ALL_TOOLS)
-            response = await model_with_tools.ainvoke(messages)
-            llm_ms = (time.monotonic() - t_llm) * 1000
-            logger.info("│ LLM Success: %s", name)
-            break  # Success!
-        except Exception as e:
-            err_str = str(e).lower()
-            if "429" in err_str or "quota" in err_str or "resource" in err_str:
-                logger.warning("│ ⚠️ Quota hit on %s: %s", name, str(e).split('\n')[0])
-            else:
-                logger.error("│ ❌ Error on %s: %s", name, str(e).split('\n')[0])
-            continue
-
-    if not response:
-        raise RuntimeError("All configured LLMs hit quota limits or failed.")
+    # ---- call model with fallbacks via unified router ------------- #
+    response, llm_ms = await llm_router.invoke_agent(
+        messages=messages,
+        tools=ALL_TOOLS,
+        has_image=(image is not None),
+    )
 
     tool_names = [tc["name"] for tc in response.tool_calls] if response.tool_calls else []
 
     if tool_names:
         logger.info("│ LLM decided (%.0fms): TOOL CALL → %s", llm_ms, tool_names)
     elif response.content:
-        logger.info("│ LLM decided (%.0fms): DIRECT RESPONSE (%d chars)", llm_ms, len(response.content))
+        logger.info("│ LLM decided (%.0fms): DIRECT RESPONSE (%d chars)", llm_ms, len(str(response.content)))
     else:
         logger.info("│ LLM decided (%.0fms): EMPTY RESPONSE", llm_ms)
 
@@ -230,18 +178,7 @@ async def _run_agent(text: str, image: Any | None) -> str:
 
     # ---- no tool calls — direct model response ------------------- #
     if response.content:
-        # LangChain sometimes returns Gemini output as a list of dict blocks
-        if isinstance(response.content, list):
-            text_parts = []
-            for block in response.content:
-                if isinstance(block, dict) and "text" in block:
-                    text_parts.append(block["text"])
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            final_text = "".join(text_parts).strip()
-        else:
-            final_text = str(response.content).strip()
-            
+        final_text = extract_text_from_content(response.content)
         return final_text if final_text else "I'm not sure how to help with that. 📚"
 
     return "I'm not sure how to help with that. Try asking a question or managing your schedule! 📚"
@@ -250,8 +187,6 @@ async def _run_agent(text: str, image: Any | None) -> str:
 async def _fallback(text: str) -> str:
     """Last-resort: plain text generation without tools."""
     try:
-        from src.agents.llm_router import llm_router
-
         prompt = (
             "You are a helpful college study assistant. "
             "Answer the following question concisely:\n\n" + (text or "Hello")

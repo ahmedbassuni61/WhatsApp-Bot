@@ -106,12 +106,17 @@
 
 ### 4. Agent Layer (`src/agents/`)
 
-**Responsibility**: Resilient multi-provider routing and agentic verification.
+**Responsibility**: Unified multi-provider routing, single-inference reasoning, and tool execution.
 
 - **`llm_router.py`**:
-  - Automatically rotates requests across Google Gemini (`gemini-2.5-flash-lite`, `gemini-flash-latest`, `gemini-3.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `qwen/qwen3.8-27b`, `allam-2-7b`).
-  - Shields the bot from Google free-tier 429 quota exhaustion.
-  - Supports multimodal vision inputs (`PIL.Image`).
+  - Centralized LLM gateway managing cached LangChain model pools with automatic quota failover.
+  - Failover sequence: Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) → Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
+  - Automatic image optimization: downscales large camera photos to 1024px JPEG (~100KB) to minimize network payload.
+- **`agent.py`**:
+  - Core agent orchestrator: answers study/academic questions and conversation **directly in a single inference pass (~1.2s)**.
+  - Automatically dispatches to tools when calendar modifications or timetable parsing are requested.
+- **`tools.py`**:
+  - Pydantic-typed tools for Google Calendar actions (`view_schedule`, `add_calendar_event`, `delete_calendar_event`) and timetable image OCR (`parse_timetable_image`).
 
 **LangGraph State**:
 ```python
@@ -138,13 +143,15 @@ class AgentState(TypedDict):
   - Media decryption via `/chat/getBase64FromMediaMessage`.
   - Session lifecycle management (connect, QR, reset, status).
 - **`bot.py`**:
-  - Webhook dispatcher with humanized typing presence (`composing`, jittered delay between 1.5s - 4.0s).
-  - Routes group messages to `GroupListener` and direct messages to study assistant.
+  - Webhook dispatcher with **synchronized real-time typing presence** (`composing` triggers immediately upon message arrival).
+  - Delivers replies instantly upon model completion with **zero artificial sleep delays**.
+  - Routes group messages and direct messages to the tool-calling agent.
 - **`group_listener.py`**:
   - Multimodal schedule parser utilizing `llm_router`.
   - Extracts structured JSON schedule events from Arabic/English text and university timetable images.
 - **`calendar_sync.py`**:
-  - Direct integration with Google Calendar API.
+  - Integration with Google Calendar API using non-blocking `asyncio.to_thread` execution.
+  - `cache_discovery=False` to eliminate legacy oauth2client file cache warnings.
   - Syncs to a shared secondary calendar (`Option 1`) for multi-user access.
   - Color-coded events with automatic 1h & 15m reminders.
   - Intelligent deletion engine: supports bulk clearing (`delete all`), cross-language subject mapping, and LLM matching.

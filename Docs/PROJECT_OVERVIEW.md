@@ -49,19 +49,19 @@ College students deal with fragmented study resources:
 
 | Concept | Implementation |
 |:--------|:---------------|
-| **Agentic AI** | LangGraph state machine with query routing, retrieval, multi-LLM verification, and answer composition |
-| **Multi-LLM Router** | Automatic failover across Google Gemini (Flash Lite / Latest) and Groq Cloud (Llama 3.3 70B, Qwen, Allam) |
+| **Agentic AI** | LangGraph & LangChain tool-calling with single-inference direct answers for study questions |
+| **Multi-LLM Gateway** | Automatic failover across Google Gemini (3.5 / 2.5 Flash & Lite) and Groq Cloud (Llama 3.3 70B, Mixtral) |
 | **RAG** | ChromaDB vector store + FastEmbed embeddings + semantic chunking |
-| **Multi-Modal** | Gemini vision for timetable and problem analysis, Whisper for audio/video transcription |
+| **Multi-Modal** | Gemini vision with client-side image compression for timetable and problem analysis, Whisper for audio/video |
 | **Cost** | **$0/month** — all free-tier APIs, local embeddings, open-source tools |
 
 ## Tech Stack
 
-- **Python** (FastAPI, LangGraph, LangChain, Pydantic)
+- **Python** (FastAPI, LangGraph, LangChain, Pydantic, pytest)
 - **Evolution API v2 & PostgreSQL** (WhatsApp Gateway via Baileys)
 - **ChromaDB** (vector database)
-- **Google Gemini (Flash Lite / Latest)** + **Groq Cloud (Llama 3.3 70B, Qwen, Allam)** (LLMs)
-- **Google Calendar API** (shared calendar sync with automated reminders)
+- **Google Gemini (3.5 / 2.5 Flash & Lite)** + **Groq Cloud (Llama 3.3 70B, Mixtral)** (LLMs)
+- **Google Calendar API** (non-blocking shared calendar sync with automated reminders)
 - **FastEmbed** (local embeddings)
 - **OpenAI Whisper** (transcription)
 - **Docker & Docker Compose** (full stack containerization)

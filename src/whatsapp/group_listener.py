@@ -16,7 +16,6 @@ import logging
 import os
 from datetime import datetime
 
-import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,9 +23,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 from src.tools.time_tool import time_tool
-
-# Configure Gemini for schedule parsing
-genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
 
 SCHEDULE_PARSE_PROMPT = """You are an intelligent college schedule parsing assistant.
 Analyze the following WhatsApp message (and attached schedule/timetable image if present).

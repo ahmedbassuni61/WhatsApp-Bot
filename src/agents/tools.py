@@ -323,6 +323,5 @@ ALL_TOOLS = [
     view_schedule,
     add_calendar_event,
     delete_calendar_event,
-    answer_question,
     parse_timetable_image,
 ]

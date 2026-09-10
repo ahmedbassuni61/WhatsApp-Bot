@@ -89,6 +89,12 @@ class WhatsAppBot:
             logger.debug("Skipping status broadcast")
             return
 
+        # Signal typing indicator immediately so user gets feedback even while media is downloading
+        try:
+            await self.client.send_presence(remote_jid, "composing")
+        except Exception:
+            pass
+
         # Extract message text
         message_obj = data.get("message", {})
         text = self._extract_text(message_obj)
@@ -143,6 +149,10 @@ class WhatsAppBot:
                     await self.send_reply(remote_jid, response)
                 else:
                     logger.info("  → Group handler returned no response (not an announcement)")
+                    try:
+                        await self.client.send_presence(remote_jid, "paused")
+                    except Exception:
+                        pass
         else:
             if self._on_direct_message:
                 logger.info("  → Routing to direct message agent")
@@ -151,29 +161,24 @@ class WhatsAppBot:
                     logger.info("📤 [DM] Response to %s (%d chars): '%s'",
                                 sender_name, len(response), response[:120])
                     await self.send_reply(remote_jid, response)
+                else:
+                    try:
+                        await self.client.send_presence(remote_jid, "paused")
+                    except Exception:
+                        pass
 
     async def send_reply(self, to_jid: str, response: str | dict) -> None:
         """
-        Send a reply with humanized typing delay to reduce ban risk.
+        Send a reply to recipient.
+        Note: The composing (typing) indicator is already triggered before model processing.
 
         Args:
             to_jid: Recipient JID
             response: Either a string (text reply) or a dict with keys:
                       {"text": "...", "image_base64": "...", "image_caption": "..."}
         """
-        # Simulate typing (1.5 - 3.5 seconds, proportional to response length)
-        try:
-            await self.client.send_presence(to_jid, "composing")
-        except Exception:
-            pass  # Non-critical if presence fails
-
         try:
             if isinstance(response, str):
-                # Scale delay with message length (min 1.5s, max 4s)
-                delay = min(1.5 + len(response) * 0.005, 4.0)
-                delay += random.uniform(-0.3, 0.5)  # Add jitter
-                await asyncio.sleep(max(delay, 1.0))
-
                 await self.client.send_text(to_jid, response)
 
             elif isinstance(response, dict):
@@ -183,16 +188,12 @@ class WhatsAppBot:
                 doc_path = response.get("document_path")
 
                 if text:
-                    delay = min(1.5 + len(text) * 0.005, 4.0) + random.uniform(-0.3, 0.5)
-                    await asyncio.sleep(max(delay, 1.0))
                     await self.client.send_text(to_jid, text)
 
                 if image_b64:
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
                     await self.client.send_image(to_jid, image_b64, caption=image_caption)
 
                 if doc_path:
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
                     await self.client.send_document(to_jid, doc_path)
         except Exception as send_err:
             logger.error("Failed to send reply to %s: %s", to_jid, send_err)

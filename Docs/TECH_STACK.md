@@ -6,37 +6,34 @@ Every technology in this project was selected for **zero cost** operation at mea
 
 ## 1. Multi-LLM Router Architecture (`src/agents/llm_router.py`)
 
-A centralized, resilient multi-LLM router with automatic failover across free-tier providers to prevent rate-limit interruptions.
+A centralized, unified multi-LLM gateway with model pooling, memory caching, and automatic failover across free-tier providers.
 
-### Primary Vision & Parsing: Google Gemini
-- **`gemini-2.5-flash-lite` (Default)**:
-  - **Free Limits**: 15 RPM, 1,500 Requests Per Day, 250k TPM
-  - **Strengths**: Lightning fast, full multimodal vision (extracts 15+ exam dates and times from low-contrast timetable images in ~5-9s), generous daily budget.
-- **`gemini-flash-latest` & `gemini-3.5-flash-lite`**:
-  - Secondary multimodal failover when lite limits are approached.
-- **`gemini-2.5-flash`**:
-  - Retained as last-resort fallback due to strict Google AI Studio free-tier limit of **20 Requests Per Day**.
+### Primary Multimodal & Tool Reasoning: Google Gemini
+- **`gemini-3.5-flash` & `gemini-3.5-flash-lite`**:
+  - High-speed reasoning, full multimodal vision (timetable image OCR), generous request budget.
+- **`gemini-2.5-flash` & `gemini-2.5-flash-lite`**:
+  - Secondary multimodal failovers when higher tiers hit quotas or rate limits.
 
-### Verification & High-Speed Reasoning: Groq Cloud
+### Text Fallback & Verification: Groq Cloud
 - **Models**:
   - `llama-3.3-70b-versatile` (70B parameter open-weights leader)
-  - `qwen/qwen3.8-27b` (bilingual mathematical and reasoning specialist)
-  - `allam-2-7b` (Arabic language specialist)
+  - `mixtral-8x7b-32768` (fast mixture-of-experts fallback)
 - **Free Limits**: 30 RPM, 1,000 RPD (no credit card required)
 - **Speed**: 300-800 tokens/second on custom LPUs.
-- **Role**: Text Q&A fallback, answer verification, consensus checking, bilingual query translation.
+- **Role**: Text Q&A fallback and tool-calling when vision is not required.
 
-### Tertiary Fallbacks
-- **Cerebras Cloud**: 1M tokens/day of Llama 3.3 70B at 1,800 tok/s.
-- **OpenRouter Free Tier**: Access to DeepSeek R1, Llama 3.3, and Qwen.
+### Performance & Latency Optimizations
+- **Single-Inference Responses**: General study questions and conversations are answered directly in 1 LLM pass (~1.2s), bypassing unnecessary tool call redirection.
+- **Model Object Caching**: Models are pre-initialized in memory inside `LLMRouter.__init__()`, eliminating object construction overhead on incoming messages.
+- **Image Compression**: Automatically downscales high-res photos to max 1024px and encodes as JPEG with quality=85, cutting payloads from 10MB+ down to ~100KB.
+- **Non-Blocking Calendar API**: Runs Google Calendar `.execute()` calls in `asyncio.to_thread` with `cache_discovery=False`.
 
 ### Combined Daily Free Capacity
 | Provider & Model Tier | Daily Requests | Primary Capability |
 |:----------------------|:---------------|:-------------------|
-| Gemini Flash Lite / Latest | ~1,500 RPD | Multimodal vision, timetable OCR, primary Q&A |
-| Groq (Llama 3.3 / Qwen / Allam) | ~1,000 RPD | Fast text generation, Arabic NLP, verification |
-| Cerebras (Llama 3.3) | ~500-1,000 RPD | High-throughput backup |
-| OpenRouter Free | ~200 RPD | Emergency fallback |
+| Gemini 3.5 / 2.5 Flash & Flash Lite | ~1,500 RPD | Multimodal vision, timetable OCR, primary Q&A |
+| Groq (Llama 3.3 70B / Mixtral) | ~1,000 RPD | Fast text generation, tool calling fallback |
+| Cerebras / OpenRouter | ~500-1,000 RPD | Backup text endpoints |
 | **Total Guaranteed Free** | **~3,000-3,500+ / day** | Completely $0/month |
 
 ---
