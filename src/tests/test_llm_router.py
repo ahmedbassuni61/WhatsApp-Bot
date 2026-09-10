@@ -42,8 +42,8 @@ def test_router_model_setup():
 
 
 def test_router_fallback_on_429():
-    """Verify that router fails over to the next model when a 429 quota error occurs."""
-    router = LLMRouter()
+    """Verify that router fails over to the next model when a 429 quota error occurs and blacklists it."""
+    router = LLMRouter(quota_cooldown_seconds=300.0)
 
     # Mock model 1 (fails with 429)
     mock_model1 = MagicMock()
@@ -53,16 +53,25 @@ def test_router_fallback_on_429():
     mock_model2 = MagicMock()
     mock_model2.ainvoke = AsyncMock(return_value=AIMessage(content="Success from fallback!"))
 
-    router.get_models = MagicMock(return_value=[
+    router._gemini_models = [
         ("Model 1", mock_model1),
         ("Model 2", mock_model2),
-    ])
+    ]
 
     messages = [HumanMessage(content="test")]
     response, elapsed_ms = asyncio.run(router.invoke_agent(messages))
 
     assert response.content == "Success from fallback!"
     assert mock_model1.ainvoke.called
+    assert mock_model2.ainvoke.called
+
+    # On next call, Model 1 should be skipped immediately without calling ainvoke again
+    mock_model1.ainvoke.reset_mock()
+    mock_model2.ainvoke.reset_mock()
+
+    response2, _ = asyncio.run(router.invoke_agent(messages))
+    assert response2.content == "Success from fallback!"
+    assert not mock_model1.ainvoke.called  # Skipped instantly due to cooldown!
     assert mock_model2.ainvoke.called
 
 

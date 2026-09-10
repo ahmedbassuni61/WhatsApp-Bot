@@ -6,6 +6,7 @@ Acts as the single unified LLM gateway for the entire application:
 - Prompt and vision generation for tools, background listeners, and fallbacks
 """
 
+import asyncio
 import base64 as b64mod
 import io
 import logging
@@ -91,12 +92,14 @@ def extract_text_from_content(content: Any) -> str:
 class LLMRouter:
     """Single unified gateway to route requests with automatic quota failover."""
 
-    def __init__(self, temperature: float = 0.3):
+    def __init__(self, temperature: float = 0.3, quota_cooldown_seconds: float = 300.0):
         self.temperature = temperature
+        self.quota_cooldown_seconds = quota_cooldown_seconds
         self.gemini_key = os.getenv("GEMINI_API_KEY", "")
         self.groq_key = os.getenv("GROQ_API_KEY", "")
         self._gemini_models: list[tuple[str, Any]] = []
         self._groq_models: list[tuple[str, Any]] = []
+        self._quota_cooldowns: dict[str, float] = {}
         self._init_models()
 
     def _init_models(self) -> None:
@@ -132,8 +135,7 @@ class LLMRouter:
                     logger.warning("Failed to initialize %s (%s): %s", label, model_id, init_err)
 
     def get_models(self, has_image: bool = False) -> list[tuple[str, Any]]:
-        """Return cached models in failover priority order."""
-        # Re-check keys in case environment variables were patched or loaded dynamically
+        """Return cached models in failover priority order, filtering out models on quota cooldown."""
         current_gemini = os.getenv("GEMINI_API_KEY", "")
         current_groq = os.getenv("GROQ_API_KEY", "")
         if current_gemini != self.gemini_key or current_groq != self.groq_key or (not self._gemini_models and not self._groq_models):
@@ -141,52 +143,64 @@ class LLMRouter:
             self.groq_key = current_groq
             self._init_models()
 
-        if has_image:
-            return list(self._gemini_models)
-        return list(self._gemini_models) + list(self._groq_models)
+        all_models = list(self._gemini_models) if has_image else (list(self._gemini_models) + list(self._groq_models))
+
+        # Filter out models currently on quota cooldown
+        now = time.monotonic()
+        available_models = [m for m in all_models if self._quota_cooldowns.get(m[0], 0.0) <= now]
+
+        if available_models:
+            skipped = [m[0] for m in all_models if m[0] not in [a[0] for a in available_models]]
+            if skipped:
+                logger.debug("│ Skipping models on quota cooldown: %s", skipped)
+            return available_models
+
+        # If all models are on cooldown, reset cooldowns and retry all as fallback
+        logger.warning("│ All models are on quota cooldown! Resetting cooldowns to retry.")
+        self._quota_cooldowns.clear()
+        return all_models
 
     async def invoke_agent(
         self,
         messages: list[BaseMessage],
         tools: list[Any] | None = None,
         has_image: bool = False,
+        timeout: float = 25.0,
     ) -> tuple[Any, float]:
         """
         Invoke the LLM with automatic failover across models.
-
-        Args:
-            messages: List of LangChain messages (SystemMessage, HumanMessage, etc.)
-            tools: Optional list of tools to bind to the model
-            has_image: Whether an image is included in the request
-
-        Returns:
-            Tuple of (response_message, elapsed_ms)
         """
         models = self.get_models(has_image=has_image)
         if not models:
             raise RuntimeError("No LLM API keys configured or models available.")
 
         response = None
-        llm_ms = 0.0
         t_llm = time.monotonic()
 
         for name, model in models:
             try:
                 logger.info("│ Trying LLM : %s...", name)
                 runner = model.bind_tools(tools) if tools else model
-                response = await runner.ainvoke(messages)
+                response = await asyncio.wait_for(runner.ainvoke(messages), timeout=timeout)
                 llm_ms = (time.monotonic() - t_llm) * 1000
                 logger.info("│ LLM Success: %s (%.0fms)", name, llm_ms)
+                # Clear quota cooldown on success
+                self._quota_cooldowns.pop(name, None)
                 return response, llm_ms
+            except asyncio.TimeoutError:
+                logger.warning("│ ⚠️ Timeout (%.0fs) on %s — temporary 5-min cooldown", timeout, name)
+                self._quota_cooldowns[name] = time.monotonic() + self.quota_cooldown_seconds
+                continue
             except Exception as e:
                 err_str = str(e).lower()
-                if "429" in err_str or "quota" in err_str or "resource" in err_str:
-                    logger.warning("│ ⚠️ Quota hit on %s: %s", name, str(e).split("\n")[0])
+                if "429" in err_str or "quota" in err_str or "resource" in err_str or "exhausted" in err_str:
+                    logger.warning("│ ⚠️ Quota hit on %s — blacklisting for %.0fs: %s", name, self.quota_cooldown_seconds, str(e).split("\n")[0])
+                    self._quota_cooldowns[name] = time.monotonic() + self.quota_cooldown_seconds
                 else:
                     logger.error("│ ❌ Error on %s: %s", name, str(e).split("\n")[0])
                 continue
 
-        raise RuntimeError("All configured LLMs hit quota limits or failed.")
+        raise RuntimeError("All configured LLMs hit quota limits, timed out, or failed.")
 
     async def generate(self, prompt: str, image: Any | None = None) -> str:
         """

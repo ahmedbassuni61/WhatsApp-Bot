@@ -41,6 +41,38 @@
     {
       "role": "assistant",
       "content": "تم حذف جميع الفعاليات والمواعيد النهائية (Deadlines) المسجلة في الفترة من 15/8 إلى 20/8 بنجاح من التقويم الخاص بك."
+    },
+    {
+      "role": "user",
+      "content": "what is the current day"
+    },
+    {
+      "role": "assistant",
+      "content": "اليوْم هو **الخميس، 10 سبتمبر 2026**."
+    },
+    {
+      "role": "user",
+      "content": "add deadlines every day in the current week at 2 pm"
+    },
+    {
+      "role": "assistant",
+      "content": "لقد قمت بإضافة مواعيد نهائية (Deadlines) يومية في تمام الساعة 2:00 ظهراً طوال أيام هذا الأسبوع (من الإثنين 7 سبتمبر وحتى الأحد 13 سبتمبر 2026) إلى تقويم Google الخاص بك!"
+    },
+    {
+      "role": "user",
+      "content": "delete the first 3 deadlines this week"
+    },
+    {
+      "role": "assistant",
+      "content": "تم حذف أول ثلاثة مواعيد نهائية (deadlines) لهذا الأسبوع (7، 8، و9 سبتمبر 2026) بنجاح من التقويم الخاص بك."
+    },
+    {
+      "role": "user",
+      "content": "thanks"
+    },
+    {
+      "role": "assistant",
+      "content": "العفو! أنا دائماً في خدمتك لمساعدتك في تنظيم جدولك الدراسي والإجابة على أي أسئلة أخرى. بالتوفيق في دراستك! 🎓✨"
     }
   ]
 }
