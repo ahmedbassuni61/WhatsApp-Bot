@@ -24,15 +24,19 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------ #
 _calendar_sync = None
 _llm_router = None
+_drive_client = None
+_drive_indexer = None
 _current_image = None  # PIL Image for the current message (set per request)
 
 
-def init_tools(*, calendar_sync, llm_router):
+def init_tools(*, calendar_sync, llm_router, drive_client=None, drive_indexer=None):
     """Wire up runtime dependencies. Called once during app startup."""
-    global _calendar_sync, _llm_router
+    global _calendar_sync, _llm_router, _drive_client, _drive_indexer
     _calendar_sync = calendar_sync
     _llm_router = llm_router
-    logger.info("Agent tools initialized")
+    _drive_client = drive_client
+    _drive_indexer = drive_indexer
+    logger.info("Agent tools initialized (Calendar, LLM Router, Drive)")
 
 
 def set_current_image(image):
@@ -93,6 +97,26 @@ class ParseTimetableInput(BaseModel):
     """Input for parsing a timetable image."""
 
     caption: str = Field(default="", description="Caption or text that accompanied the timetable image")
+
+
+class SearchDriveInput(BaseModel):
+    """Input for searching college Google Drive materials."""
+
+    query: str = Field(
+        description="Search keywords, course name, lecture number, or document title (e.g. 'Data Structures', 'ذكاء اصطناعي', 'Algorithm lecture 1', 'midterm exams')"
+    )
+    file_type: str = Field(
+        default="all",
+        description="Optional filter by file type: 'pdf', 'slides', 'doc', 'sheet', 'folder', or 'all'",
+    )
+
+
+class CourseOverviewInput(BaseModel):
+    """Input for getting course details, lecture counts, or semester subjects."""
+
+    query: str = Field(
+        description="Subject/course name (e.g. 'Digital IC', 'Control', 'Networks', 'Antenna') or semester/term name (e.g. '1st Term', 'first semester', '2nd Term')"
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -315,6 +339,113 @@ async def parse_timetable_image(caption: str = "") -> str:
         return f"⚠️ Could not process the timetable image: {e}"
 
 
+@tool(args_schema=SearchDriveInput)
+async def search_college_drive(query: str, file_type: str = "all") -> str:
+    """Search the college Google Drive (Level 4) for lecture slides, past exams, summaries, assignments, or course folders.
+    Use when the student asks for study materials, slides, previous exams, drive links, or syllabus."""
+    logger.info("🔧 search_college_drive(query='%s', file_type='%s')", query, file_type)
+    try:
+        indexer = _drive_indexer
+        if not indexer:
+            from src.drive.drive_indexer import drive_indexer
+            indexer = drive_indexer
+
+        # 1. Smart route: if user is asking for a semester/term overview
+        term_data = indexer.get_term_overview(query)
+        if term_data:
+            return indexer.format_term_overview_message(term_data)
+
+        # 2. Smart route: if query asks how many lectures/sections or for a subject overview
+        lower_q = query.lower()
+        if any(w in lower_q for w in ["how many", "lectures in", "كام", "محاضرة", "محاضرات", "overview"]):
+            course_data = indexer.get_course_details(query)
+            if course_data:
+                return indexer.format_course_details_message(course_data)
+
+        # 3. Search indexed SQLite database (STRICTLY confined to Level 4)
+        results = indexer.search(query=query, file_type=file_type, limit=5)
+
+        if not results:
+            # Check if a course matches as a fallback before giving up
+            course_data = indexer.get_course_details(query)
+            if course_data:
+                return indexer.format_course_details_message(course_data)
+
+            return (
+                f"🔍 No materials found in Level 4 College Drive matching: *{query}*\n"
+                "💡 *Tip:* Search for subjects like 'Digital IC', 'Networks', 'Control', 'Antenna', or ask 'what do I have in first semester?'"
+            )
+
+        type_label = f" ({file_type.upper()})" if file_type != "all" else ""
+        lines = [f"📂 *Level 4 Drive Search Results{type_label}:* _{query}_\n"]
+
+        for idx, item in enumerate(results, 1):
+            icon = item.get("icon", "📄")
+            name = item.get("name", "Untitled")
+            path = item.get("full_path", "")
+            link = item.get("web_view_link", "")
+            size_str = f" ({item['size_str']})" if item.get("size_str") else ""
+
+            entry = (
+                f"{idx}. {icon} *{name}*{size_str}\n"
+                f"   📍 _{path}_\n"
+                f"   🔗 {link}"
+            )
+            lines.append(entry)
+
+        lines.append("💡 _Click any link above to open directly in Google Drive._")
+        return "\n\n".join(lines)
+    except Exception as e:
+        logger.error("  ✗ search_college_drive failed: %s", e)
+        return f"⚠️ College Drive search error: {e}"
+
+
+@tool(args_schema=CourseOverviewInput)
+async def get_course_details(query: str) -> str:
+    """Get the full course overview, material breakdown, and file counts (lectures, sections, labs, exams)
+    or list all registered subjects in a semester/term from the college Google Drive.
+    Use when the student asks:
+    - How many lectures, sections, or labs exist for a course (e.g. 'how many lectures in digital ic')
+    - What subjects exist in first/second semester (e.g. 'what do I have in first semester', 'subjects in 1st term')
+    - An overview, folder link, or syllabus structure for any course (e.g. 'Digital IC', 'Control', 'Networks', 'Antenna')"""
+    logger.info("🔧 get_course_details(query='%s')", query)
+    try:
+        indexer = _drive_indexer
+        if not indexer:
+            from src.drive.drive_indexer import drive_indexer
+            indexer = drive_indexer
+
+        # 1. Check if asking for term overview
+        term_data = indexer.get_term_overview(query)
+        if term_data:
+            return indexer.format_term_overview_message(term_data)
+
+        # 2. Check if asking for course details
+        course_data = indexer.get_course_details(query)
+        if course_data:
+            return indexer.format_course_details_message(course_data)
+
+        # 3. Fall back to search
+        search_res = indexer.search(query=query, limit=5)
+        if search_res:
+            lines = [f"📂 *Drive Folders & Files for:* _{query}_\n"]
+            for idx, item in enumerate(search_res, 1):
+                icon = item.get("icon", "📁")
+                name = item.get("name", "Untitled")
+                link = item.get("web_view_link", "")
+                path = item.get("full_path", "")
+                lines.append(f"{idx}. {icon} *{name}*\n   📍 _{path}_\n   🔗 {link}")
+            return "\n\n".join(lines)
+
+        return (
+            f"🔍 Could not find course or term matching: *{query}* in Level 4 College Drive.\n"
+            "💡 Try: '1st Term', '2nd Term', 'Digital IC', 'Control', 'Networks', 'Antenna', 'Digital Communications'."
+        )
+    except Exception as e:
+        logger.error("  ✗ get_course_details failed: %s", e)
+        return f"⚠️ Course overview error: {e}"
+
+
 # ------------------------------------------------------------------ #
 # Export list for the agent
 # ------------------------------------------------------------------ #
@@ -324,4 +455,7 @@ ALL_TOOLS = [
     add_calendar_event,
     delete_calendar_event,
     parse_timetable_image,
+    search_college_drive,
+    get_course_details,
 ]
+

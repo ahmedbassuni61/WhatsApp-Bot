@@ -44,6 +44,8 @@ from src.whatsapp.bot import WhatsAppBot
 from src.whatsapp.calendar_sync import CalendarSync
 from src.whatsapp.evolution_client import EvolutionClient
 from src.whatsapp.group_listener import GroupListener
+from src.drive import GoogleDriveClient
+from src.drive.drive_indexer import drive_indexer
 
 load_dotenv()
 
@@ -85,6 +87,7 @@ evolution_client: EvolutionClient | None = None
 whatsapp_bot: WhatsAppBot | None = None
 group_listener: GroupListener | None = None
 calendar_sync: CalendarSync | None = None
+drive_client: GoogleDriveClient | None = None
 
 
 # ------------------------------------------------------------------ #
@@ -112,7 +115,7 @@ def _decode_image(media: dict | None) -> PIL.Image.Image | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global evolution_client, whatsapp_bot, group_listener, calendar_sync
+    global evolution_client, whatsapp_bot, group_listener, calendar_sync, drive_client
 
     logger.info("🚀 Starting College Assistant AI...")
 
@@ -125,9 +128,20 @@ async def lifespan(app: FastAPI):
     )
     group_listener = GroupListener(announcement_group_jid=announcement_jid)
     calendar_sync = CalendarSync()
+    drive_client = GoogleDriveClient()
 
-    # Wire tool dependencies so the agent can call calendar / LLM
-    init_tools(calendar_sync=calendar_sync, llm_router=llm_router)
+    # Wire tool dependencies so the agent can call calendar / LLM / Drive
+    init_tools(
+        calendar_sync=calendar_sync,
+        llm_router=llm_router,
+        drive_client=drive_client,
+        drive_indexer=drive_indexer,
+    )
+
+    # Auto-index Level 4 on startup if index is empty and Drive is authorized
+    if drive_indexer.count_items() == 0 and drive_client.is_authorized():
+        logger.info("Drive index is empty on startup. Starting background crawl of Level 4...")
+        asyncio.create_task(drive_indexer.sync_from_drive(drive_client))
 
     # ---- Message handlers ---------------------------------------- #
 
@@ -464,3 +478,49 @@ async def health():
         logger.error("Health check error: %s", e)
 
     return HealthResponse(status="ok", whatsapp_connected=wa_connected)
+
+
+# ------------------------------------------------------------------ #
+# Google Drive Endpoints
+# ------------------------------------------------------------------ #
+
+@app.get("/drive/search")
+async def drive_search(q: str = "", file_type: str = "all", limit: int = 10):
+    """Search indexed college drive materials."""
+    if not q:
+        return JSONResponse(status_code=400, content={"error": "Query parameter 'q' is required"})
+    results = drive_indexer.search(query=q, file_type=file_type, limit=limit)
+    return {
+        "query": q,
+        "file_type": file_type,
+        "count": len(results),
+        "results": results,
+    }
+
+
+@app.post("/drive/sync")
+async def drive_sync():
+    """Trigger a re-indexing crawl of the college Google Drive folder."""
+    if not drive_client:
+        return JSONResponse(status_code=500, content={"error": "Drive client not initialized"})
+    if not drive_client.is_authorized():
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "Google Drive is not authorized. Please run 'python setup_google.py' first."
+            },
+        )
+    try:
+        stats = await drive_indexer.sync_from_drive(drive_client)
+        return stats
+    except Exception as e:
+        logger.error("Drive sync failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/drive/stats")
+async def drive_stats():
+    """Return statistics on the indexed college drive."""
+    stats = drive_indexer.get_stats()
+    stats["authorized"] = drive_client.is_authorized() if drive_client else False
+    return stats
