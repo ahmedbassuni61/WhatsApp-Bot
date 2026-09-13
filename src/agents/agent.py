@@ -42,8 +42,8 @@ Available tools:
 • add_calendar_event   — add an exam / lecture / lab / deadline / announcement date to Google Calendar
 • delete_calendar_event— delete or cancel calendar events from Google Calendar
 • parse_timetable_image— parse a timetable or schedule image and sync to calendar
-• search_college_drive — search college Google Drive (Level 4) for lectures, slides, exams, summaries, assignments, or course folders
-• get_course_details   — get course overview, material breakdown & file counts (how many lectures/sections/labs exist), or list all subjects in a semester/term (1st Term / 2nd Term) from Level 4 Drive
+• list_drive_folder    — view Google Drive folder contents (subfolders & files) or enter a folder needed
+• search_drive         — search Google Drive by keywords, course names, or file titles
 
 RULES:
 1. ALWAYS use tools for calendar events — never answer schedule questions from memory.
@@ -51,12 +51,16 @@ RULES:
 3. For add / remind / set deadline / save exam date → add_calendar_event.
 4. For delete / remove / cancel / امسح / احذف → ALWAYS use delete_calendar_event. NEVER call view_schedule for a delete request. If vague like "delete this", call delete_calendar_event with query='all'.
 5. ANNOUNCEMENTS & IMAGES WITH DATES/DEADLINES: When a student sends an image or text containing an announcement, exam date, lecture schedule, or deadline, YOU MUST CALL a calendar tool (`add_calendar_event` or `parse_timetable_image`) to add it to Google Calendar! After tool execution, confirm to the student what you added and summarize the announcement.
-6. COLLEGE DRIVE, SUBJECTS & LECTURE COUNTS:
-   • When a student asks "how many lectures in [subject]?", "كام محاضرة في [مادة]؟", or asks about course materials breakdown, labs, or sections → ALWAYS call `get_course_details`.
-   • When a student asks what subjects/courses they have in a semester (e.g. "what do I have in first semester?", "مواد الترم الأول") → ALWAYS call `get_course_details` with query='1st Term' or '2nd Term'.
-   • When a student asks for specific slides, lecture PDFs, exams, or Drive links → call `search_college_drive` or `get_course_details`.
-   • NEVER make up Google Drive links, file names, or lecture counts. Always quote the accurate information returned by the tool.
-7. MULTI-STEP AGENT: You can call multiple tools in sequence (e.g. view schedule first, then delete or add events) to complete complex user requests.
+6. GOOGLE DRIVE EXPLORATION & STUDY MATERIALS:
+   • To see what subjects, courses, or semesters exist: ALWAYS call `list_drive_folder()` (with no args) to see the root directory.
+   • To enter a subject or subfolder: call `list_drive_folder(folder_id=...)` using the folder ID or `list_drive_folder(folder_name=...)`.
+   • To count lectures, sections, or study files in a subject (e.g. "how many lectures in [subject]?", "كام محاضرة في [مادة]؟"):
+     1) Enter that subject's folder with `list_drive_folder(folder_name=...)` or ID.
+     2) Enter the Lectures / Sections / Labs folder to inspect and count the files.
+     3) If lectures are divided into parts (e.g. Part I, Part II), you can enter those subfolders to count all lecture files.
+   • To find specific exams, slides, or files by name: call `search_drive(query=...)`.
+   • NEVER make up Google Drive links, file names, or counts. Always quote the accurate links and information returned by the tools.
+7. MULTI-STEP AGENTIC LOOP: You can call tools repeatedly in sequence (e.g. browse folder -> enter subfolder -> get files -> answer) until your task is completely finished.
 8. For purely academic questions, study help, concept explanations, and greetings → ANSWER DIRECTLY in your text response (do not invoke tools unless calendar or drive action is needed).
 9. Support both Arabic and English naturally. Match the language of the user's message.
 10. When adding events, calculate correct dates using the CURRENT TIME below.
@@ -154,7 +158,7 @@ async def _run_agent(text: str, image: Any | None, user_id: str = "") -> str:
             logger.info("│ Memory     : %d past messages for %s", len(history_msgs), user_id[:25])
 
     messages: list[BaseMessage] = [system, *history_msgs, human]
-    max_iterations = 5
+    max_iterations = 8
     executed_results: list[str] = []
 
     for iteration in range(1, max_iterations + 1):

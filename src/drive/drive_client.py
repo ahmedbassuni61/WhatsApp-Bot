@@ -11,6 +11,7 @@ Handles:
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,6 +32,17 @@ DRIVE_SCOPES = [
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 
+def format_file_size(size_bytes: int) -> str:
+    """Format bytes into readable MB/KB."""
+    if not size_bytes or size_bytes <= 0:
+        return ""
+    if size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    return f"{size_bytes} B"
+
+
 class GoogleDriveClient:
     """Async wrapper around Google Drive API v3."""
 
@@ -44,10 +56,29 @@ class GoogleDriveClient:
             "GOOGLE_CREDENTIALS_PATH", "./credentials.json"
         )
         self.token_path = token_path or "./token.json"
-        self.root_folder_id = root_folder_id or os.getenv(
-            "GOOGLE_DRIVE_FOLDER_ID", "1oVFxVUEWi1m98vyIGd8pkei6mQrwo47o"
-        )
+        self.root_folder_id = (
+            root_folder_id or os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+        ).strip()
+        if not self.root_folder_id:
+            # Fallback: check .env file directly if environment variable wasn't injected
+            env_file = Path(".env")
+            if env_file.is_file():
+                try:
+                    for line in env_file.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line.startswith("GOOGLE_DRIVE_FOLDER_ID="):
+                            self.root_folder_id = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+                except Exception:
+                    pass
+        if not self.root_folder_id:
+            logger.warning(
+                "GOOGLE_DRIVE_FOLDER_ID is not configured in environment or .env!"
+            )
         self._service = None
+        self._cache: dict[str, tuple[float, list[dict]]] = {}
+        self._meta_cache: dict[str, tuple[float, dict]] = {}
+        self._cache_ttl = 180.0  # 3 minutes
 
     def is_authorized(self) -> bool:
         """Check if token.json exists and contains drive scope."""
@@ -105,11 +136,37 @@ class GoogleDriveClient:
         self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
         return self._service
 
+    async def get_folder_meta(self, folder_id: str) -> dict:
+        """Fetch folder metadata (name, webViewLink) with caching."""
+        now = time.monotonic()
+        if folder_id in self._meta_cache:
+            ts, cached = self._meta_cache[folder_id]
+            if now - ts < self._cache_ttl:
+                return cached
+
+        def _fetch():
+            service = self._get_service()
+            return service.files().get(
+                fileId=folder_id,
+                fields="id, name, mimeType, webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+
+        meta = await asyncio.to_thread(_fetch)
+        self._meta_cache[folder_id] = (now, meta)
+        return meta
+
     async def list_folder_children(self, folder_id: str) -> list[dict]:
         """
         List all direct child files and folders inside folder_id.
-        Handles pagination automatically.
+        Uses in-memory TTL caching (3 min) for responsive agent loops.
         """
+        now = time.monotonic()
+        if folder_id in self._cache:
+            ts, cached = self._cache[folder_id]
+            if now - ts < self._cache_ttl:
+                return cached
+
         def _fetch():
             service = self._get_service()
             items = []
@@ -139,7 +196,94 @@ class GoogleDriveClient:
 
             return items
 
-        return await asyncio.to_thread(_fetch)
+        items = await asyncio.to_thread(_fetch)
+        self._cache[folder_id] = (now, items)
+        return items
+
+    async def explore_folder(
+        self, folder_id: Optional[str] = None, folder_name: Optional[str] = None
+    ) -> dict:
+        """
+        Explore a folder in Google Drive.
+        - If folder_id is provided, enter that folder.
+        - If folder_name is provided without folder_id, finds matching folder under root or by search.
+        - If neither is provided, explores the root folder.
+        Returns metadata, subfolders list, files list, and counts.
+        """
+        target_id = (folder_id or "").strip()
+        if target_id.lower() in ("none", "null", "undefined", '""', "''"):
+            target_id = ""
+
+        # If folder_name is provided without folder_id, find it
+        if folder_name and folder_name.strip().lower() in ("none", "null", "undefined", '""', "''"):
+            folder_name = None
+
+        if not target_id and folder_name:
+            clean_name = folder_name.strip().lower()
+            # 1. Check root children first
+            root_children = await self.list_folder_children(self.root_folder_id)
+            for item in root_children:
+                if item.get("mimeType") == FOLDER_MIME_TYPE:
+                    if clean_name in item.get("name", "").lower():
+                        target_id = item["id"]
+                        break
+
+            # 2. If not found in root, search Drive for folder matching name
+            if not target_id:
+                search_res = await self.search_drive_api(folder_name.strip(), max_results=10)
+                for item in search_res:
+                    if item.get("mimeType") == FOLDER_MIME_TYPE:
+                        target_id = item["id"]
+                        break
+
+        # Default to root if still not resolved
+        if not target_id:
+            target_id = self.root_folder_id
+
+        if not target_id:
+            raise ValueError("No Google Drive folder ID configured.")
+
+        # Get folder meta and children
+        meta = await self.get_folder_meta(target_id)
+        children = await self.list_folder_children(target_id)
+
+        subfolders = []
+        files = []
+
+        for c in children:
+            cid = c.get("id", "")
+            cname = c.get("name", "Untitled")
+            clink = c.get("webViewLink") or f"https://drive.google.com/file/d/{cid}/view"
+            is_folder = c.get("mimeType") == FOLDER_MIME_TYPE
+            size_int = int(c.get("size", 0)) if c.get("size") else 0
+
+            if is_folder:
+                subfolders.append({
+                    "id": cid,
+                    "name": cname,
+                    "link": clink,
+                })
+            else:
+                files.append({
+                    "id": cid,
+                    "name": cname,
+                    "link": clink,
+                    "size_str": format_file_size(size_int),
+                    "size_bytes": size_int,
+                })
+
+        subfolders.sort(key=lambda x: x["name"].lower())
+        files.sort(key=lambda x: x["name"].lower())
+
+        return {
+            "folder_id": target_id,
+            "folder_name": meta.get("name", "Folder"),
+            "folder_link": meta.get("webViewLink") or f"https://drive.google.com/drive/folders/{target_id}",
+            "subfolders": subfolders,
+            "files": files,
+            "total_subfolders": len(subfolders),
+            "total_files": len(files),
+        }
 
     async def crawl_folder_tree(
         self, root_folder_id: Optional[str] = None, max_depth: int = 8

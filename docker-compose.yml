@@ -71,6 +71,8 @@ services:
       dockerfile: Dockerfile
     container_name: college_assistant
     restart: always
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     environment:
@@ -83,12 +85,14 @@ services:
       - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME:-college-bot}
       - ANNOUNCEMENT_GROUP_JID=${ANNOUNCEMENT_GROUP_JID:-}
       - GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-primary}
+      - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
       - WEBHOOK_URL=http://python-backend:8000/webhook
       - API_PORT=8000
       - TIMEZONE=${TIMEZONE:-Africa/Cairo}
       - TZ=${TIMEZONE:-Africa/Cairo}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
+      - ./.env:/app/.env:ro
       - ./src:/app/src
       - ./data:/app/data
       - ./chroma_db:/app/chroma_db

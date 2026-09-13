@@ -29,7 +29,13 @@ _drive_indexer = None
 _current_image = None  # PIL Image for the current message (set per request)
 
 
-def init_tools(*, calendar_sync, llm_router, drive_client=None, drive_indexer=None):
+def init_tools(
+    *,
+    calendar_sync=None,
+    llm_router=None,
+    drive_client=None,
+    drive_indexer=None,
+):
     """Wire up runtime dependencies. Called once during app startup."""
     global _calendar_sync, _llm_router, _drive_client, _drive_indexer
     _calendar_sync = calendar_sync
@@ -99,23 +105,24 @@ class ParseTimetableInput(BaseModel):
     caption: str = Field(default="", description="Caption or text that accompanied the timetable image")
 
 
+class ListDriveFolderInput(BaseModel):
+    """Input for listing or entering a Google Drive folder."""
+
+    folder_id: Optional[str] = Field(
+        default=None,
+        description="The Google Drive folder ID to enter and list. Leave empty or None to view the root directory.",
+    )
+    folder_name: Optional[str] = Field(
+        default=None,
+        description="Optional name of the folder to enter (e.g. 'Transmission Media', 'Lectures') if folder_id is not known.",
+    )
+
+
 class SearchDriveInput(BaseModel):
-    """Input for searching college Google Drive materials."""
+    """Input for searching files or folders across Google Drive."""
 
     query: str = Field(
-        description="Search keywords, course name, lecture number, or document title (e.g. 'Data Structures', 'ذكاء اصطناعي', 'Algorithm lecture 1', 'midterm exams')"
-    )
-    file_type: str = Field(
-        default="all",
-        description="Optional filter by file type: 'pdf', 'slides', 'doc', 'sheet', 'folder', or 'all'",
-    )
-
-
-class CourseOverviewInput(BaseModel):
-    """Input for getting course details, lecture counts, or semester subjects."""
-
-    query: str = Field(
-        description="Subject/course name (e.g. 'Digital IC', 'Control', 'Networks', 'Antenna') or semester/term name (e.g. '1st Term', 'first semester', '2nd Term')"
+        description="Search keyword, course name, lecture title, or exam (e.g. 'Transmission Media final', 'Lecture 1', 'Sheet 2')"
     )
 
 
@@ -339,111 +346,111 @@ async def parse_timetable_image(caption: str = "") -> str:
         return f"⚠️ Could not process the timetable image: {e}"
 
 
-@tool(args_schema=SearchDriveInput)
-async def search_college_drive(query: str, file_type: str = "all") -> str:
-    """Search the college Google Drive (Level 4) for lecture slides, past exams, summaries, assignments, or course folders.
-    Use when the student asks for study materials, slides, previous exams, drive links, or syllabus."""
-    logger.info("🔧 search_college_drive(query='%s', file_type='%s')", query, file_type)
+@tool(args_schema=ListDriveFolderInput)
+async def list_drive_folder(
+    folder_id: Optional[str] = None, folder_name: Optional[str] = None
+) -> str:
+    """View the contents of a Google Drive directory (subfolders and files) or enter a folder needed.
+    - If folder_id and folder_name are omitted: shows the root directory (subjects, courses, or semester folders).
+    - To enter a folder: pass its folder_id (from a previous listing) or folder_name.
+    Use this tool to explore the drive, check courses, count lectures/files in any subject, or browse study materials."""
+    logger.info(
+        "🔧 list_drive_folder(folder_id='%s', folder_name='%s')",
+        folder_id,
+        folder_name,
+    )
+    if folder_id and str(folder_id).strip().lower() in ("none", "null", "undefined", '""', "''"):
+        folder_id = None
+    if folder_name and str(folder_name).strip().lower() in ("none", "null", "undefined", '""', "''"):
+        folder_name = None
+
     try:
-        indexer = _drive_indexer
-        if not indexer:
-            from src.drive.drive_indexer import drive_indexer
-            indexer = drive_indexer
-
-        # 1. Smart route: if user is asking for a semester/term overview
-        term_data = indexer.get_term_overview(query)
-        if term_data:
-            return indexer.format_term_overview_message(term_data)
-
-        # 2. Smart route: if query asks how many lectures/sections or for a subject overview
-        lower_q = query.lower()
-        if any(w in lower_q for w in ["how many", "lectures in", "كام", "محاضرة", "محاضرات", "overview"]):
-            course_data = indexer.get_course_details(query)
-            if course_data:
-                return indexer.format_course_details_message(course_data)
-
-        # 3. Search indexed SQLite database (STRICTLY confined to Level 4)
-        results = indexer.search(query=query, file_type=file_type, limit=5)
-
-        if not results:
-            # Check if a course matches as a fallback before giving up
-            course_data = indexer.get_course_details(query)
-            if course_data:
-                return indexer.format_course_details_message(course_data)
-
-            return (
-                f"🔍 No materials found in Level 4 College Drive matching: *{query}*\n"
-                "💡 *Tip:* Search for subjects like 'Digital IC', 'Networks', 'Control', 'Antenna', or ask 'what do I have in first semester?'"
-            )
-
-        type_label = f" ({file_type.upper()})" if file_type != "all" else ""
-        lines = [f"📂 *Level 4 Drive Search Results{type_label}:* _{query}_\n"]
-
-        for idx, item in enumerate(results, 1):
-            icon = item.get("icon", "📄")
-            name = item.get("name", "Untitled")
-            path = item.get("full_path", "")
-            link = item.get("web_view_link", "")
-            size_str = f" ({item['size_str']})" if item.get("size_str") else ""
-
-            entry = (
-                f"{idx}. {icon} *{name}*{size_str}\n"
-                f"   📍 _{path}_\n"
-                f"   🔗 {link}"
-            )
-            lines.append(entry)
-
-        lines.append("💡 _Click any link above to open directly in Google Drive._")
-        return "\n\n".join(lines)
-    except Exception as e:
-        logger.error("  ✗ search_college_drive failed: %s", e)
-        return f"⚠️ College Drive search error: {e}"
-
-
-@tool(args_schema=CourseOverviewInput)
-async def get_course_details(query: str) -> str:
-    """Get the full course overview, material breakdown, and file counts (lectures, sections, labs, exams)
-    or list all registered subjects in a semester/term from the college Google Drive.
-    Use when the student asks:
-    - How many lectures, sections, or labs exist for a course (e.g. 'how many lectures in digital ic')
-    - What subjects exist in first/second semester (e.g. 'what do I have in first semester', 'subjects in 1st term')
-    - An overview, folder link, or syllabus structure for any course (e.g. 'Digital IC', 'Control', 'Networks', 'Antenna')"""
-    logger.info("🔧 get_course_details(query='%s')", query)
-    try:
-        indexer = _drive_indexer
-        if not indexer:
-            from src.drive.drive_indexer import drive_indexer
-            indexer = drive_indexer
-
-        # 1. Check if asking for term overview
-        term_data = indexer.get_term_overview(query)
-        if term_data:
-            return indexer.format_term_overview_message(term_data)
-
-        # 2. Check if asking for course details
-        course_data = indexer.get_course_details(query)
-        if course_data:
-            return indexer.format_course_details_message(course_data)
-
-        # 3. Fall back to search
-        search_res = indexer.search(query=query, limit=5)
-        if search_res:
-            lines = [f"📂 *Drive Folders & Files for:* _{query}_\n"]
-            for idx, item in enumerate(search_res, 1):
-                icon = item.get("icon", "📁")
-                name = item.get("name", "Untitled")
-                link = item.get("web_view_link", "")
-                path = item.get("full_path", "")
-                lines.append(f"{idx}. {icon} *{name}*\n   📍 _{path}_\n   🔗 {link}")
-            return "\n\n".join(lines)
-
-        return (
-            f"🔍 Could not find course or term matching: *{query}* in Level 4 College Drive.\n"
-            "💡 Try: '1st Term', '2nd Term', 'Digital IC', 'Control', 'Networks', 'Antenna', 'Digital Communications'."
+        data = await _drive_client.explore_folder(
+            folder_id=folder_id, folder_name=folder_name
         )
+        folder_name_val = data["folder_name"]
+        folder_link = data["folder_link"]
+        cur_id = data["folder_id"]
+        subfolders = data["subfolders"]
+        files = data["files"]
+
+        lines = [
+            f"📁 *Current Folder:* **{folder_name_val}** (ID: `{cur_id}`)",
+            f"🔗 [Open Folder in Google Drive]({folder_link})\n",
+        ]
+
+        if subfolders:
+            lines.append(f"📂 *Subfolders ({len(subfolders)}):*")
+            for idx, sf in enumerate(subfolders, 1):
+                lines.append(
+                    f"{idx}. 📁 **{sf['name']}** — ID: `{sf['id']}` (🔗 [Link]({sf['link']}))"
+                )
+            lines.append("")
+
+        if files:
+            lines.append(f"📄 *Files ({len(files)}):*")
+            for idx, f in enumerate(files[:40], 1):
+                size = f" ({f['size_str']})" if f.get("size_str") else ""
+                lines.append(f"{idx}. 📄 [{f['name']}]({f['link']}){size}")
+            if len(files) > 40:
+                lines.append(f"... and {len(files) - 40} more files.")
+            lines.append("")
+
+        if not subfolders and not files:
+            lines.append(
+                "*(This folder is currently empty - 0 files and 0 subfolders)*\n"
+            )
+
+        lines.append(
+            f"📊 *Summary:* {len(subfolders)} subfolders, {len(files)} files."
+        )
+        lines.append(
+            "💡 *Tip:* Call `list_drive_folder(folder_id='<ID>')` or `list_drive_folder(folder_name='<Name>')` to enter any subfolder listed above."
+        )
+        return "\n".join(lines)
     except Exception as e:
-        logger.error("  ✗ get_course_details failed: %s", e)
-        return f"⚠️ Course overview error: {e}"
+        logger.error("  ✗ list_drive_folder failed: %s", e)
+        return f"⚠️ Drive folder error: {e}"
+
+
+@tool(args_schema=SearchDriveInput)
+async def search_drive(query: str) -> str:
+    """Search Google Drive directly by keywords, course names, or file titles (e.g. 'Transmission Media Final', 'Lecture 1', 'Sheet 2').
+    Use when looking for a specific exam, lecture file, sheet, or topic across the entire Drive."""
+    logger.info("🔧 search_drive(query='%s')", query)
+    try:
+        from src.drive.drive_client import format_file_size
+
+        items = await _drive_client.search_drive_api(query, max_results=12)
+        if not items:
+            return f"🔍 No files or folders found matching: *{query}* on Google Drive."
+
+        lines = [f"🔍 *Drive Search Results for:* _{query}_\n"]
+        for idx, item in enumerate(items, 1):
+            name = item.get("name", "Untitled")
+            item_id = item.get("id", "")
+            is_folder = item.get("mimeType") == "application/vnd.google-apps.folder"
+            link = (
+                item.get("webViewLink")
+                or f"https://drive.google.com/file/d/{item_id}/view"
+            )
+            size_int = int(item.get("size", 0)) if item.get("size") else 0
+            size_str = f" ({format_file_size(size_int)})" if size_int > 0 else ""
+
+            if is_folder:
+                lines.append(
+                    f"{idx}. 📁 **{name}** — ID: `{item_id}` (🔗 [Open Folder]({link}))"
+                )
+            else:
+                lines.append(f"{idx}. 📄 [{name}]({link}){size_str}")
+
+        lines.append(
+            "\n💡 *To open a folder found above, call `list_drive_folder(folder_id='<ID>')`.*"
+        )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("  ✗ search_drive failed: %s", e)
+        return f"⚠️ Drive search error: {e}"
 
 
 # ------------------------------------------------------------------ #
@@ -455,7 +462,7 @@ ALL_TOOLS = [
     add_calendar_event,
     delete_calendar_event,
     parse_timetable_image,
-    search_college_drive,
-    get_course_details,
+    list_drive_folder,
+    search_drive,
 ]
 

@@ -134,7 +134,26 @@ class DriveIndexer:
                 CREATE INDEX IF NOT EXISTS idx_is_folder ON drive_items(is_folder);
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS index_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                """
+            )
             conn.commit()
+
+    def get_indexed_root_id(self) -> Optional[str]:
+        """Return the root folder ID that was last indexed."""
+        try:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM index_meta WHERE key = 'root_folder_id'")
+                row = cur.fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
 
     def count_items(self) -> int:
         """Return total number of indexed items."""
@@ -210,6 +229,14 @@ class DriveIndexer:
                     """,
                     records,
                 )
+                conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('root_folder_id', ?)",
+                    (getattr(drive_client, "root_folder_id", ""),),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_synced', ?)",
+                    (now_iso,),
+                )
                 conn.commit()
 
         await asyncio.to_thread(_save_to_db)
@@ -263,7 +290,7 @@ class DriveIndexer:
 
             # Base query
             sql = """
-                SELECT id, name, full_path, mime_type, web_view_link, size_bytes,
+                SELECT id, name, parent_id, full_path, mime_type, web_view_link, size_bytes,
                        modified_time, is_folder, normalized_name, normalized_path
                 FROM drive_items
                 WHERE 1=1
@@ -336,7 +363,7 @@ class DriveIndexer:
                     score += 50
 
                 # Penalize root folder
-                if row["full_path"].strip() == "Level 4":
+                if not row["parent_id"] or "/" not in row["full_path"]:
                     score -= 50
 
                 icon = get_icon_for_item(
@@ -361,10 +388,77 @@ class DriveIndexer:
             ranked.sort(key=lambda x: (x["score"], x["modified_time"]), reverse=True)
             return ranked[:limit]
 
+    def _build_term_response(
+        self,
+        conn: sqlite3.Connection,
+        term_name: str,
+        term_link: str,
+        raw_subjects: list,
+        other_folders: list,
+    ) -> dict:
+        cur = conn.cursor()
+        subjects = []
+        standard_cats = {
+            "lectures",
+            "sections",
+            "labs",
+            "exams",
+            "projects",
+            "references",
+            "students effort",
+            "sheets",
+        }
+
+        for s in raw_subjects:
+            s_name = s["name"]
+            s_link = s["web_view_link"]
+            s_path = s["full_path"]
+
+            # Check if this subject has elective options or sub-courses
+            cur.execute(
+                """
+                SELECT id, name, full_path, web_view_link
+                FROM drive_items
+                WHERE full_path LIKE ? AND full_path NOT LIKE ? AND is_folder = 1
+                ORDER BY full_path
+                """,
+                (f"{s_path} / %", f"{s_path} / % / %"),
+            )
+            sub_options = cur.fetchall()
+            elective_items = []
+            for opt in sub_options:
+                opt_norm = normalize_search_text(opt["name"])
+                if not any(cat in opt_norm for cat in standard_cats):
+                    elective_items.append({
+                        "name": opt["name"],
+                        "clean_name": re.sub(r"^\d+\.\s*", "", opt["name"]).strip(),
+                        "link": opt["web_view_link"],
+                    })
+
+            is_elective = len(elective_items) > 0
+
+            subjects.append({
+                "name": s_name,
+                "clean_name": re.sub(r"^\d+\.\s*", "", s_name).strip(),
+                "link": s_link,
+                "is_elective": is_elective,
+                "options": elective_items if is_elective else [],
+            })
+
+        return {
+            "term_name": term_name,
+            "term_link": term_link,
+            "subjects": subjects,
+            "other_folders": other_folders,
+        }
+
     def get_term_overview(self, query: str) -> Optional[dict]:
         """
-        Check if query is asking for a semester/term overview (e.g. 1st term, 2nd term).
-        Returns subjects and folders for that term.
+        Check if query is asking for a semester/term overview or general subject list.
+        Supports:
+        - Term queries (e.g. '1st term', '2nd term', 'term 1', 'semester 1', 'الترم الأول')
+        - General subject queries (e.g. 'what are the subjects', 'subjects', 'courses', 'مواد', 'قائمة المواد')
+        - Direct subject root structures where subjects are directly under root / 01.Subjects without term folders.
         """
         q_norm = normalize_search_text(query)
         target_term = None
@@ -375,108 +469,120 @@ class DriveIndexer:
         elif any(w in q_norm for w in ["grad", "graduation", "تخرج"]):
             target_term = "Graduation Project"
 
-        if not target_term:
-            return None
+        is_general_query = any(
+            w in q_norm
+            for w in [
+                "subject",
+                "course",
+                "ماد",
+                "مواد",
+                "منهج",
+                "curriculum",
+                "ترم",
+                "semester",
+                "term",
+            ]
+        )
 
         with self._get_connection() as conn:
             cur = conn.cursor()
-            # Find the term folder
-            cur.execute(
-                "SELECT id, name, full_path, web_view_link FROM drive_items WHERE full_path = ? OR full_path = ?",
-                (f"Level 4 / {target_term}", f"Level 4 / {target_term} "),
-            )
-            term_row = cur.fetchone()
-            if not term_row:
+
+            term_row = None
+            if target_term:
                 cur.execute(
                     "SELECT id, name, full_path, web_view_link FROM drive_items WHERE is_folder = 1 AND normalized_name LIKE ?",
                     (f"%{normalize_search_text(target_term)}%",),
                 )
                 term_row = cur.fetchone()
 
-            if not term_row:
-                return None
-
-            term_path = term_row["full_path"]
-
-            # Get immediate subfolders in this term (e.g. 01.Subjects, 02.Weekly Post, etc.)
-            cur.execute(
-                """
-                SELECT id, name, full_path, web_view_link, is_folder
-                FROM drive_items
-                WHERE full_path LIKE ? AND full_path NOT LIKE ?
-                ORDER BY full_path
-                """,
-                (f"{term_path} / %", f"{term_path} / % / %"),
-            )
-            top_folders = cur.fetchall()
-
-            # Get subjects under 01.Subjects
-            subjects_path = f"{term_path} / 01.Subjects"
-            cur.execute(
-                """
-                SELECT id, name, full_path, web_view_link, is_folder
-                FROM drive_items
-                WHERE full_path LIKE ? AND full_path NOT LIKE ?
-                ORDER BY full_path
-                """,
-                (f"{subjects_path} / %", f"{subjects_path} / % / %"),
-            )
-            raw_subjects = cur.fetchall()
-
-            subjects = []
-            standard_cats = {"lectures", "sections", "labs", "exams", "projects", "references", "students effort"}
-            for s in raw_subjects:
-                s_name = s["name"]
-                s_link = s["web_view_link"]
-                s_path = s["full_path"]
-
-                # If this subject has elective options (e.g. Elective III has 3 sub-subjects)
+            # 1. If specific term folder was found
+            if term_row:
+                term_path = term_row["full_path"]
                 cur.execute(
                     """
-                    SELECT id, name, full_path, web_view_link
+                    SELECT id, name, full_path, web_view_link, is_folder
                     FROM drive_items
                     WHERE full_path LIKE ? AND full_path NOT LIKE ?
                     ORDER BY full_path
                     """,
-                    (f"{s_path} / %", f"{s_path} / % / %"),
+                    (f"{term_path} / %", f"{term_path} / % / %"),
                 )
-                sub_options = cur.fetchall()
-                # Check if sub-options are course names rather than standard material folders
-                elective_items = []
-                for opt in sub_options:
-                    opt_norm = normalize_search_text(opt["name"])
-                    if not any(cat in opt_norm for cat in standard_cats):
-                        elective_items.append({
-                            "name": opt["name"],
-                            "clean_name": re.sub(r"^\d+\.\s*", "", opt["name"]).strip(),
-                            "link": opt["web_view_link"],
+                top_folders = cur.fetchall()
+
+                subjects_parent_path = None
+                for f in top_folders:
+                    if "01.subjects" in f["name"].lower() or "subjects" in f["name"].lower():
+                        subjects_parent_path = f["full_path"]
+                        break
+
+                search_parent = subjects_parent_path or term_path
+                cur.execute(
+                    """
+                    SELECT id, name, full_path, web_view_link, is_folder
+                    FROM drive_items
+                    WHERE full_path LIKE ? AND full_path NOT LIKE ? AND is_folder = 1
+                    ORDER BY full_path
+                    """,
+                    (f"{search_parent} / %", f"{search_parent} / % / %"),
+                )
+                raw_subjects = cur.fetchall()
+
+                other_folders = []
+                for f in top_folders:
+                    if f["full_path"] != subjects_parent_path:
+                        other_folders.append({
+                            "name": f["name"],
+                            "clean_name": re.sub(r"^\d+\.\s*", "", f["name"]).strip(),
+                            "link": f["web_view_link"],
                         })
 
-                is_elective = len(elective_items) > 0
+                return self._build_term_response(
+                    conn, target_term, term_row["web_view_link"], raw_subjects, other_folders
+                )
 
-                subjects.append({
-                    "name": s_name,
-                    "clean_name": re.sub(r"^\d+\.\s*", "", s_name).strip(),
-                    "link": s_link,
-                    "is_elective": is_elective,
-                    "options": elective_items if is_elective else [],
-                })
+            # 2. If no term folder was found, but query asks about subjects or terms
+            if is_general_query or target_term is not None:
+                # Look for '01.Subjects' or folder named 'Subjects'
+                cur.execute(
+                    """
+                    SELECT id, name, full_path, web_view_link
+                    FROM drive_items
+                    WHERE is_folder = 1 AND (normalized_name LIKE '%01 subjects%' OR normalized_name = 'subjects')
+                    ORDER BY LENGTH(full_path) ASC
+                    """
+                )
+                subjects_row = cur.fetchone()
 
-            other_folders = []
-            for f in top_folders:
-                if "01.Subjects" not in f["name"]:
-                    other_folders.append({
-                        "name": f["name"],
-                        "clean_name": re.sub(r"^\d+\.\s*", "", f["name"]).strip(),
-                        "link": f["web_view_link"],
-                    })
+                # Fallback to root folder if no '01.Subjects'
+                if not subjects_row:
+                    cur.execute(
+                        "SELECT id, name, full_path, web_view_link FROM drive_items WHERE parent_id = '' LIMIT 1"
+                    )
+                    subjects_row = cur.fetchone()
 
-            return {
-                "term_name": target_term,
-                "term_link": term_row["web_view_link"],
-                "subjects": subjects,
-                "other_folders": other_folders,
-            }
+                if not subjects_row:
+                    return None
+
+                root_id = subjects_row["id"]
+                cur.execute(
+                    """
+                    SELECT id, name, full_path, web_view_link, is_folder
+                    FROM drive_items
+                    WHERE parent_id = ? AND is_folder = 1
+                    ORDER BY name
+                    """,
+                    (root_id,),
+                )
+                raw_subjects = cur.fetchall()
+                if not raw_subjects:
+                    return None
+
+                display_title = target_term or "College Curriculum"
+                return self._build_term_response(
+                    conn, display_title, subjects_row["web_view_link"], raw_subjects, []
+                )
+
+            return None
 
 
     def get_course_details(self, query: str) -> Optional[dict]:

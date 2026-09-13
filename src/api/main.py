@@ -138,10 +138,9 @@ async def lifespan(app: FastAPI):
         drive_indexer=drive_indexer,
     )
 
-    # Auto-index Level 4 on startup if index is empty and Drive is authorized
-    if drive_indexer.count_items() == 0 and drive_client.is_authorized():
-        logger.info("Drive index is empty on startup. Starting background crawl of Level 4...")
-        asyncio.create_task(drive_indexer.sync_from_drive(drive_client))
+    # Google Drive status log
+    if drive_client.is_authorized():
+        logger.info("✅ Google Drive connected for root folder: %s", drive_client.root_folder_id)
 
     # ---- Message handlers ---------------------------------------- #
 
