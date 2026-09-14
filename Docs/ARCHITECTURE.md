@@ -106,35 +106,46 @@
 
 ### 4. Agent Layer (`src/agents/`)
 
-**Responsibility**: Unified multi-provider routing, single-inference reasoning, and tool execution.
+**Responsibility**: Unified multi-provider routing, multi-step tool execution loop, and conversational memory.
 
 - **`llm_router.py`**:
-  - Centralized LLM gateway managing cached LangChain model pools with automatic quota failover.
+  - Centralized LLM gateway managing cached LangChain model pools with automatic quota failover and cooldown tracking.
   - Failover sequence: Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) → Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
   - Automatic image optimization: downscales large camera photos to 1024px JPEG (~100KB) to minimize network payload.
 - **`agent.py`**:
-  - Core agent orchestrator: answers study/academic questions and conversation **directly in a single inference pass (~1.2s)**.
-  - Automatically dispatches to tools when calendar modifications or timetable parsing are requested.
+  - Autonomous agent loop: executes multi-step tool calling (up to 8 iterations) when inspecting Drive directories, checking schedules, or adding events.
+  - Answers general study/academic questions and greetings directly in a single inference pass (~1.2s).
+- **`memory.py`**:
+  - Per-user conversation memory buffer keyed by sender JID, retaining previous turns so students can ask contextual follow-up questions.
 - **`tools.py`**:
-  - Pydantic-typed tools for Google Calendar actions (`view_schedule`, `add_calendar_event`, `delete_calendar_event`) and timetable image OCR (`parse_timetable_image`).
+  - Pydantic-typed tools:
+    - `view_schedule`: query upcoming Google Calendar events.
+    - `add_calendar_event`: schedule events with the student's verbatim WhatsApp message saved in the event description.
+    - `delete_calendar_event`: keyword or bulk event deletion.
+    - `parse_timetable_image`: multimodal schedule and timetable OCR.
+    - `list_drive_folder`: dynamically inspect any Drive folder, browse subjects, count lectures, and get direct links.
+    - `search_drive`: search indexed Drive study materials by topic or filename.
 
-**LangGraph State**:
-```python
-class AgentState(TypedDict):
-    query: str                    # Original user question
-    query_type: str               # factual | conceptual | exam-prep | schedule
-    retrieved_chunks: list        # Top-k relevant chunks
-    retrieved_images: list        # Associated images/frames
-    llm_responses: dict           # {provider: response} from each LLM
-    consensus: bool               # Do the LLMs agree?
-    confidence: float             # 0.0 - 1.0
-    final_answer: str             # Merged answer
-    sources: list                 # Citations
-    user_confirmed: bool          # Has the user confirmed?
-    export_path: str | None       # Path to generated image/PDF
-```
+### 5. Google Drive Materials Layer (`src/drive/`)
 
-### 5. WhatsApp Layer (`src/whatsapp/`)
+**Responsibility**: Dynamic folder exploration, metadata indexing, and study material discovery.
+
+- **`drive_client.py`**:
+  - Async wrapper around Google Drive API v3.
+  - Fetches folder trees, file metadata, MIME types, and web view links.
+- **`drive_indexer.py`**:
+  - SQLite persistent cache for indexed files and folders.
+  - Background crawler with batch upserting, file type filtering, and subfolder traversal.
+
+### 6. Time Intelligence Layer (`src/tools/`)
+
+**Responsibility**: Timezone-aware date calculations and deterministic relative time resolution.
+
+- **`time_tool.py`**:
+  - Configurable timezone support (`Africa/Cairo`).
+  - Deterministic mathematical resolution of relative time expressions ("tomorrow at 3pm", "كمان ساعتين", "Sunday next week", "بعد بكرة") that patches LLM tool outputs to prevent date/time hallucination.
+
+### 7. WhatsApp Layer (`src/whatsapp/`)
 
 **Responsibility**: WhatsApp gateway communication, media extraction, schedule ingestion, and calendar synchronization.
 
@@ -152,11 +163,12 @@ class AgentState(TypedDict):
 - **`calendar_sync.py`**:
   - Integration with Google Calendar API using non-blocking `asyncio.to_thread` execution.
   - `cache_discovery=False` to eliminate legacy oauth2client file cache warnings.
-  - Syncs to a shared secondary calendar (`Option 1`) for multi-user access.
+  - Syncs to a shared secondary calendar for multi-user access.
+  - Automatically records the original student message or announcement verbatim in the event's description.
   - Color-coded events with automatic 1h & 15m reminders.
   - Intelligent deletion engine: supports bulk clearing (`delete all`), cross-language subject mapping, and LLM matching.
 
-### 6. API Layer (`src/api/`)
+### 8. API Layer (`src/api/`)
 
 **Responsibility**: FastAPI HTTP interface, lifecycle management, and webhooks.
 
@@ -166,6 +178,10 @@ POST /query            ← Direct Q&A endpoint (routes through llm_router)
 GET  /schedule         ← Upcoming events from Google Calendar
 POST /schedule/delete  ← Delete event endpoint (keyword + date)
 GET  /groups           ← List joined WhatsApp groups and JIDs
+GET  /drive/search     ← Search indexed college drive materials
+POST /drive/sync       ← Trigger a re-indexing crawl of Google Drive
+GET  /drive/stats      ← Return Drive indexing statistics
+GET  /time             ← Bot's current timezone-aware date and time info
 GET  /qr               ← Browser-based interactive pairing dashboard
 GET  /qr/json          ← Real-time QR base64 and connection state
 POST /qr/reset         ← Re-initialize session and generate fresh QR

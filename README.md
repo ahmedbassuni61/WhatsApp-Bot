@@ -13,13 +13,26 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
 
 ### 📅 Multimodal Timetable Parsing & Shared Google Calendar
 - **AI Timetable OCR**: Send a photo of complex university exam schedules (Arabic or English). The bot parses all dates, subjects, times, and halls, and adds them directly to Google Calendar.
-- **Shared Multi-User Calendar (Option 1)**: Syncs to a dedicated shared secondary Google Calendar. Unlimited students and faculty can subscribe via calendar link without individual OAuth logins.
+- **Verbatim Message Preservation**: The student's exact WhatsApp message or announcement text is saved verbatim into the calendar event's `description` field for full context.
+- **Shared Multi-User Calendar**: Syncs to a dedicated shared secondary Google Calendar. Unlimited students and faculty can subscribe via calendar link without individual OAuth logins.
 - **Intelligent Deletion**: Supports natural language deletion (`/delete math`, `احذف امتحان الرياضيات`) and bulk clearing (`delete all exam schedule`) with cross-language subject aliases and LLM fallback.
 - **Instant Schedule Query**: Check upcoming exams anytime with `/schedule` or `جدول`.
 
+### 📁 Google Drive Academic Materials Explorer & Search
+- **Dynamic Folder Exploration**: The bot dynamically lists folders, subjects, and subdirectories (`list_drive_folder`), allowing students to explore course materials, lectures, and sections on any drive structure without hardcoded paths.
+- **Multi-Step Subject Inquiries**: Handles multi-step requests like "How many lectures in Digital Communications?" or "كام محاضرة في المادة؟" by autonomously navigating into course subfolders, counting files, and providing direct Drive links.
+- **Semantic Drive Search**: Find specific exam slides, summaries, or lectures with `search_drive`.
+
+### ⏰ Timezone & Relative Time Intelligence (`src/tools/time_tool.py`)
+- **Deterministic Time Math**: Resolves relative time phrases ("tomorrow at 3pm", "كمان ساعتين", "Sunday next week", "بعد بكرة") mathematically with timezone awareness (`Africa/Cairo`), ensuring zero date/time hallucination.
+
+### 🧠 Agentic Loop & Conversation Memory (`src/agents/agent.py`, `memory.py`)
+- **Iterative Tool Execution**: Autonomous multi-step tool-calling loop (up to 8 iterations) where the agent can browse, search, verify, and act sequentially before responding.
+- **Per-User Memory**: Context-aware conversation history per user JID so follow-up queries retain context.
+
 ### ⚡ Unified Multi-LLM Gateway (`src/agents/llm_router.py`)
 - **Single-Inference Responses**: General study questions, concept explanations, and homework help are answered directly in a single LLM pass (~1.2s), cutting API calls and latency in half.
-- **Automatic Quota Failover**: Seamlessly fails over across Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
+- **Automatic Quota Failover**: Seamlessly fails over across Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`) with automatic cooldown tracking.
 - **Model Caching & Optimization**: Pre-caches model connections in memory and automatically downscales/compresses camera images from 10MB+ down to ~100KB JPEG before sending to the model.
 - **Combined Capacity**: ~3,500+ free queries per day across providers.
 
@@ -27,11 +40,6 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
 - **Zero-Chromium Architecture**: Built on Dockerized Evolution API v2 wrapping the Baileys WebSocket protocol.
 - **Interactive Browser Pairing**: Scan the QR code at `http://localhost:8000/qr` with real-time status detection, auto-timer, and one-click refresh.
 - **Synchronized Typing Presence**: WhatsApp `composing` indicator starts immediately upon message arrival, giving natural visual feedback while the model processes, and replies are dispatched instantly with zero artificial delay.
-
-### 📚 Multi-Source RAG & LangGraph Reasoning *(In Progress)*
-- **Data Ingestion**: Process lecture PDFs, extract textbook diagrams, and transcribe lecture audio/video with local Whisper.
-- **ChromaDB Vector Store**: Semantic retrieval across lectures, previous exams, and transcripts.
-- **LangGraph Verification**: Multi-LLM consensus verification before answering student queries.
 
 ---
 
@@ -53,12 +61,12 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
                     │  (Port 8000 / Docker)   │
                     └────────────┬────────────┘
                                  │
-         ┌───────────────────────┼───────────────────────┐
-         ▼                       ▼                       ▼
-┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-│  LLM Router      │   │ Calendar Sync    │   │ ChromaDB Vector  │
-│  Gemini + Groq   │   │ Google Cal API   │   │ Store (RAG)      │
-└──────────────────┘   └──────────────────┘   └──────────────────┘
+          ┌───────────────────────┼───────────────────────┬───────────────────────┐
+          ▼                       ▼                       ▼                       ▼
+ ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+ │  LLM Router      │   │ Calendar Sync    │   │ Drive Client &   │   │ Time & Memory    │
+ │  Gemini + Groq   │   │ Google Cal API   │   │ Dynamic Indexer  │   │ Timezone + Context
+ └──────────────────┘   └──────────────────┘   └──────────────────┘   └──────────────────┘
 ```
 
 ---
@@ -97,14 +105,15 @@ This boots three containers:
 2. In WhatsApp on your phone: **Settings → Linked Devices → Link a Device**.
 3. Scan the QR code. The browser updates to **✅ WhatsApp Connected!** immediately.
 
-### 4. Connect Google Calendar
+### 4. Connect Google APIs (Calendar & Drive)
 ```bash
-# Authorize with Google Calendar (opens browser window)
-python setup_calendar.py
+# Authorize Google Calendar & Drive (opens browser consent window)
+python setup_google.py
 ```
-Add your shared calendar ID to `.env`:
+Add your shared calendar ID and Google Drive folder ID to `.env`:
 ```env
 GOOGLE_CALENDAR_ID=your_calendar_id@group.calendar.google.com
+GOOGLE_DRIVE_FOLDER_ID=your_drive_root_folder_id
 ```
 
 ---
@@ -113,11 +122,15 @@ GOOGLE_CALENDAR_ID=your_calendar_id@group.calendar.google.com
 
 | Command / Trigger | Example | Description |
 |:------------------|:--------|:------------|
-| **View Schedule** | `/schedule` or `جدول` | Lists all upcoming exams and events |
-| **Send Timetable Image** | *(Attach photo of schedule)* | AI extracts all subjects, dates, and times and syncs to Google Calendar |
+| **View Schedule** | `/schedule` or `جدول` | Lists all upcoming exams, labs, and deadlines |
+| **Add / Remind Event** | `Remind me tomorrow at 3pm to study for digital communications quiz` | Calculates exact datetime, adds event to Google Calendar, and saves your verbatim message in the event description |
+| **Send Timetable Image** | *(Attach photo of schedule)* | AI extracts subjects, dates, and times and syncs directly to Google Calendar |
 | **Delete Single Event** | `/delete math` or `احذف امتحان الرياضيات` | Deletes matching event from Google Calendar |
 | **Bulk Clear Schedule** | `delete all exam schedule` or `احذف كل الامتحانات` | Clears all events in the semester window |
-| **Ask Study Question** | `What is inheritance in OOP?` | Answers using multi-LLM reasoning |
+| **Explore Subjects & Folders** | `list subjects` or `وريني المواد اللي عندك` | Dynamically navigates root Google Drive folders and lists available subjects |
+| **Inspect Folder Contents** | `open lectures folder` or `كام محاضرة في مادة الاتصالات؟` | Traverses course directories, counts lectures/sections, and outputs direct Drive links |
+| **Search Course Materials** | `find transmission media midterm` or `search slides` | Searches Drive index for matching PDFs, slides, and study notes |
+| **Ask Study Question** | `What is inheritance in OOP?` | Answers using multi-LLM reasoning in a single pass |
 
 ---
 
@@ -131,21 +144,29 @@ WhatsApp-bot/
 │   ├── SETUP_GUIDE.md        # Comprehensive local & cloud setup walkthrough
 │   └── TECH_STACK.md         # Detailed breakdown of zero-cost technologies
 ├── src/
-│   ├── agents/               # LLM router, tool calling, and agent reasoning
-│   │   ├── agent.py          # Message orchestration & single-inference answering
-│   │   ├── llm_router.py     # Unified Gemini + Groq gateway with model caching
-│   │   └── tools.py          # Google Calendar tools & timetable image parser
+│   ├── agents/               # LLM router, agentic tool loop, and memory
+│   │   ├── agent.py          # Message orchestration & multi-step tool-calling loop
+│   │   ├── llm_router.py     # Unified Gemini + Groq gateway with quota tracking
+│   │   ├── memory.py         # Per-user conversational memory buffer
+│   │   └── tools.py          # Calendar tools, timetable parser, & Drive browser
 │   ├── api/                  # FastAPI web server and routes
-│   │   ├── main.py           # Webhook receiver, /qr dashboard, /schedule API
+│   │   ├── main.py           # Webhook receiver, /qr dashboard, /drive & /schedule APIs
 │   │   └── models.py         # Pydantic schemas
+│   ├── drive/                # Google Drive exploration & indexing
+│   │   ├── drive_client.py   # Async Google Drive v3 client
+│   │   └── drive_indexer.py  # SQLite cache and dynamic Drive crawler
 │   ├── database/             # Vector store (ChromaDB)
 │   ├── export/               # Answer-to-image and PDF export
 │   ├── ingestion/            # PDF, audio, and video RAG processors
 │   ├── retrieval/            # Multi-collection semantic search
 │   ├── tests/                # Automated unit tests (pytest)
-│   │   ├── test_llm_router.py# LLMRouter failover and model tests
-│   │   └── test_time_tool.py # Timezone and relative time tests
-│   ├── tools/                # General utility tools (timezone/dates)
+│   │   ├── test_agentic_loop.py # Agentic tool-calling loop tests
+│   │   ├── test_drive_search.py # Google Drive search & crawler tests
+│   │   ├── test_llm_router.py   # LLMRouter failover and model tests
+│   │   ├── test_memory.py       # Conversational memory tests
+│   │   └── test_time_tool.py    # Timezone and relative time tests
+│   ├── tools/                # Time intelligence & deterministic math
+│   │   └── time_tool.py      # Relative time parser & Cairo timezone context
 │   └── whatsapp/             # WhatsApp integration
 │       ├── bot.py            # Message routing & synchronized typing presence
 │       ├── calendar_sync.py  # Non-blocking Google Calendar sync & delete engine
@@ -155,7 +176,7 @@ WhatsApp-bot/
 ├── Dockerfile                # Python backend container (with pytest)
 ├── pyproject.toml            # Project metadata & pytest configuration
 ├── requirements.txt          # Python dependencies
-└── setup_calendar.py         # Google Calendar OAuth initialization
+└── setup_google.py           # Google Calendar & Drive OAuth initialization
 ```
 
 ### 🧪 Automated Testing

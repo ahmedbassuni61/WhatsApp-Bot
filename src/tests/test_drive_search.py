@@ -4,13 +4,14 @@ Unit tests for College Google Drive search, indexer, and normalization.
 
 import pytest
 from pathlib import Path
+from unittest.mock import AsyncMock
 from src.drive.drive_indexer import (
     DriveIndexer,
     normalize_search_text,
     format_file_size,
     get_icon_for_item,
 )
-from src.agents.tools import search_college_drive
+from src.agents.tools import search_drive, list_drive_folder
 
 
 def test_arabic_and_english_normalization():
@@ -186,59 +187,59 @@ def test_type_filtering(temp_indexer):
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_output_formatting(temp_indexer, monkeypatch):
-    """Verify the search_college_drive tool returns a beautifully formatted WhatsApp message."""
+async def test_search_drive_tool(monkeypatch):
+    """Verify search_drive formats matching files and folders."""
     import src.agents.tools as agent_tools
 
-    monkeypatch.setattr(agent_tools, "_drive_indexer", temp_indexer)
+    mock_client = AsyncMock()
+    mock_client.search_drive_api.return_value = [
+        {
+            "name": "Algorithms Lecture 1.pdf",
+            "id": "file_123",
+            "mimeType": "application/pdf",
+            "size": 1024 * 1024,
+            "webViewLink": "https://drive.google.com/file/d/file_123/view",
+        }
+    ]
+    monkeypatch.setattr(agent_tools, "_drive_client", mock_client)
 
-    response = await search_college_drive.ainvoke({"query": "Algorithms lecture 1"})
-    assert "Level 4 Drive Search Results" in response or "College Drive Search Results" in response
-    assert "Lecture 1 - Introduction.pdf" in response
-    assert "Level 4 / Algorithms CS401 / Lectures" in response
-    assert "https://drive.google.com/file/d/file_lec1/view" in response
-    assert "📄" in response
+    response = await search_drive.ainvoke({"query": "Algorithms lecture 1"})
+    assert "Drive Search Results" in response
+    assert "Algorithms Lecture 1.pdf" in response
+    assert "https://drive.google.com/file/d/file_123/view" in response
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_no_results(temp_indexer, monkeypatch):
-    """Verify friendly fallback when no files match."""
+async def test_search_drive_no_results(monkeypatch):
+    """Verify search_drive friendly message when no files match."""
     import src.agents.tools as agent_tools
 
-    monkeypatch.setattr(agent_tools, "_drive_indexer", temp_indexer)
+    mock_client = AsyncMock()
+    mock_client.search_drive_api.return_value = []
+    monkeypatch.setattr(agent_tools, "_drive_client", mock_client)
 
-    response = await search_college_drive.ainvoke({"query": "Quantum Physics 999"})
-    assert "No materials found in Level 4 College Drive matching" in response or "No materials found" in response
+    response = await search_drive.ainvoke({"query": "Quantum Physics 999"})
+    assert "No files or folders found matching" in response
 
 
 @pytest.mark.asyncio
-async def test_get_course_details_and_lecture_counts(temp_indexer, monkeypatch):
-    """Verify get_course_details accurately counts lectures and handles empty/populated folders."""
+async def test_list_drive_folder_tool(monkeypatch):
+    """Verify list_drive_folder formats folder contents."""
     import src.agents.tools as agent_tools
 
-    monkeypatch.setattr(agent_tools, "_drive_indexer", temp_indexer)
+    mock_client = AsyncMock()
+    mock_client.explore_folder.return_value = {
+        "folder_name": "Level 4",
+        "folder_id": "root_123",
+        "folder_link": "https://drive.google.com/drive/folders/root_123",
+        "subfolders": [{"id": "folder_1", "name": "Algorithms CS401", "link": "https://drive.google.com/drive/folders/folder_1"}],
+        "files": [{"id": "file_1", "name": "Syllabus.pdf", "size_str": "50 KB", "link": "https://drive.google.com/file/d/file_1/view"}],
+    }
+    monkeypatch.setattr(agent_tools, "_drive_client", mock_client)
 
-    # Search for course details for Algorithms
-    details = temp_indexer.get_course_details("Algorithms")
-    assert details is not None
-    assert "Algorithms" in details["clean_title"]
-    assert "lectures" in details["categories"]
-
-    # Test tool invocation
-    msg = await agent_tools.get_course_details.ainvoke({"query": "how many lectures in algorithms"})
-    assert "Course Overview" in msg
-    assert "Algorithms" in msg
-    assert "Lectures" in msg
-
-
-@pytest.mark.asyncio
-async def test_get_term_overview_tool(temp_indexer, monkeypatch):
-    """Verify term overview returns subjects."""
-    import src.agents.tools as agent_tools
-
-    monkeypatch.setattr(agent_tools, "_drive_indexer", temp_indexer)
-
-    # Even with minimal fixture, should not crash and should format or search
-    msg = await agent_tools.get_course_details.ainvoke({"query": "what do I have in first semester"})
-    assert msg is not None
+    response = await list_drive_folder.ainvoke({"folder_name": "Level 4"})
+    assert "Level 4" in response
+    assert "Algorithms CS401" in response
+    assert "Syllabus.pdf" in response
+    assert "Summary:" in response
 

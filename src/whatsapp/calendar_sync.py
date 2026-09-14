@@ -80,9 +80,9 @@ class CalendarSync:
         elif not creds or not creds.valid:
             if not token_file.is_file():
                 raise RuntimeError(
-                    "Google Calendar not authorized yet. Please run 'python setup_calendar.py' in your terminal to log in."
+                    "Google APIs not authorized yet. Please run 'python setup_google.py' in your terminal to log in."
                 )
-            raise RuntimeError("Invalid Google Calendar credentials. Please re-run 'python setup_calendar.py'.")
+            raise RuntimeError("Invalid Google credentials. Please re-run 'python setup_google.py'.")
 
         self._service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         return self._service
@@ -106,13 +106,14 @@ class CalendarSync:
         time_end = event_data.get("time_end")
         location = event_data.get("location", "")
         event_type = event_data.get("event_type", "other")
-        description = event_data.get("description", "")
-        source = event_data.get("source_message", "")
+        description = (event_data.get("description") or "").strip()
+        source = (event_data.get("source_message") or "").strip()
+        final_description = description or source or "Scheduled via WhatsApp"
 
         # Build the event body
         event_body = {
             "summary": f"[{event_type.upper()}] {title}",
-            "description": f"{description}\n\n---\nSource: WhatsApp announcement\n{source}",
+            "description": final_description,
             "colorId": EVENT_COLORS.get(event_type, "8"),
         }
 

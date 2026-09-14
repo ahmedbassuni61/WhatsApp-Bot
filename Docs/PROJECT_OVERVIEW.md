@@ -33,12 +33,23 @@ College students deal with fragmented study resources:
 - Receive answers with source citations (which lecture, which page/timestamp)
 - Relevant lecture slides or video frames are attached as images
 
+### 📁 Google Drive Academic Materials Exploration & Search
+- **Dynamic Drive Explorer**: The bot dynamically explores Google Drive folders without requiring rigid schemas or fixed folder structures.
+- **Course & Lecture Breakdown**: Students can ask "How many lectures in [subject]?" or "وريني محاضرات المادة", and the bot autonomously explores subfolders (e.g. Lectures, Sections, Labs, Part I/II), counts files, and provides direct view links.
+- **Topic Search**: Fast semantic keyword search across indexed Drive PDFs, summary notes, and past exams.
+
 ### 📅 Schedule & Calendar Sync
 - Monitors announcement groups or direct messages for exam timetables, section announcements, and lecture updates.
 - **Multimodal Timetable Image Parsing**: Uses Gemini Flash Lite vision to read complex, multi-column university exam schedules in Arabic and English (e.g. Faculty of Engineering schedules) and automatically schedules exams with times, locations, and descriptions in seconds.
-- **Multi-User Shared Calendar (Option 1)**: Syncs to a dedicated shared Google Calendar, allowing students and faculty to subscribe and receive real-time updates and reminders.
+- **Verbatim Message Capture**: Saves the student's exact WhatsApp message or announcement text verbatim into the Google Calendar event `description`.
+- **Multi-User Shared Calendar**: Syncs to a dedicated shared Google Calendar, allowing students and faculty to subscribe and receive real-time updates and reminders.
 - **Natural Language & Bulk Event Deletion**: Delete events on-demand (`/delete math`, `delete all exam schedule`, `احذف امتحان الرياضيات`).
 - Query upcoming schedule via `/schedule` or `جدول`.
+
+### 🧠 Agentic Tool Loop & Conversation Memory
+- Multi-step iterative tool execution (up to 8 steps) allowing the bot to browse directories, look up files, check calendar, and confirm before replying.
+- Per-user session memory so follow-up inquiries maintain full conversational context.
+- Deterministic relative-time math ensuring phrases like "tomorrow at 3pm" or "كمان ساعتين" resolve accurately in `Africa/Cairo` timezone without date hallucination.
 
 ### 🖼️ Answer-to-Image Export
 - When a student **confirms** an answer is correct, it's converted into a styled study image or PDF
@@ -49,19 +60,21 @@ College students deal with fragmented study resources:
 
 | Concept | Implementation |
 |:--------|:---------------|
-| **Agentic AI** | LangGraph & LangChain tool-calling with single-inference direct answers for study questions |
-| **Multi-LLM Gateway** | Automatic failover across Google Gemini (3.5 / 2.5 Flash & Lite) and Groq Cloud (Llama 3.3 70B, Mixtral) |
+| **Agentic AI** | LangChain multi-step tool-calling loop (up to 8 steps) with single-inference direct answers for study questions |
+| **Multi-LLM Gateway** | Automatic failover across Google Gemini (3.5 / 2.5 Flash & Lite) and Groq Cloud (Llama 3.3 70B, Mixtral) with quota cooldowns |
+| **Google Drive Explorer** | Dynamic directory traversal, file counting, and SQLite caching via Google Drive API v3 |
+| **Time Intelligence** | Deterministic relative time parsing in `Africa/Cairo` timezone |
 | **RAG** | ChromaDB vector store + FastEmbed embeddings + semantic chunking |
 | **Multi-Modal** | Gemini vision with client-side image compression for timetable and problem analysis, Whisper for audio/video |
 | **Cost** | **$0/month** — all free-tier APIs, local embeddings, open-source tools |
 
 ## Tech Stack
 
-- **Python** (FastAPI, LangGraph, LangChain, Pydantic, pytest)
+- **Python** (FastAPI, LangChain, Pydantic, pytest)
 - **Evolution API v2 & PostgreSQL** (WhatsApp Gateway via Baileys)
-- **ChromaDB** (vector database)
+- **ChromaDB** (vector database) & **SQLite** (Drive index cache)
 - **Google Gemini (3.5 / 2.5 Flash & Lite)** + **Groq Cloud (Llama 3.3 70B, Mixtral)** (LLMs)
-- **Google Calendar API** (non-blocking shared calendar sync with automated reminders)
+- **Google Calendar & Drive APIs** (non-blocking calendar sync, verbatim message retention, dynamic materials explorer)
 - **FastEmbed** (local embeddings)
 - **OpenAI Whisper** (transcription)
 - **Docker & Docker Compose** (full stack containerization)

@@ -127,16 +127,27 @@ chroma_db/
 ### Google Calendar API
 - **Cost**: Free
 - **Authentication**: OAuth 2.0 with `token.json` (auto-refreshes).
-- **Multi-User Sharing (Option 1)**: Supports writing to a dedicated shared secondary calendar ID (`GOOGLE_CALENDAR_ID` in `.env`), enabling unlimited students to view updates without requiring individual OAuth credentials.
+- **Multi-User Sharing**: Supports writing to a dedicated shared secondary calendar ID (`GOOGLE_CALENDAR_ID` in `.env`), enabling unlimited students to view updates without requiring individual OAuth credentials.
 - **Security**: `credentials.json` and `token.json` are excluded from Git via `.gitignore`.
 - **Engine**:
   - Auto-creates color-coded events with reminders (1 hour and 15 mins prior).
-  - Duplicate detection.
+  - Preserves original WhatsApp messages or announcement text verbatim in the event's `description`.
+  - Duplicate detection based on title and date window.
   - Intelligent deletion: bulk clearing, cross-language English ↔ Arabic translation, and LLM matching fallback.
 
-### Google Drive API
-- **Cost**: Free (15GB storage included with Google account)
-- **Use**: Watch for new lecture uploads, auto-trigger ingestion
+### Google Drive API v3 (`src/drive/`)
+- **Cost**: Free
+- **Capabilities**:
+  - **Dynamic Folder Explorer**: `list_drive_folder` navigates any drive hierarchy on the fly, listing folders, subjects, lecture slides, and sections without hardcoded paths.
+  - **Keyword & Topic Search**: `search_drive` indexes file metadata into a local SQLite database and performs sub-second matching on lecture titles and course codes.
+  - **Combined OAuth**: Authenticated alongside Calendar via `setup_google.py` using `drive.readonly` scope.
+
+### Timezone & Relative Time Intelligence (`src/tools/time_tool.py`)
+- **Cost**: Free (standard Python standard library)
+- **Engine**: Evaluates relative time phrases ("tomorrow at 3pm", "Sunday next week", "كمان ساعتين", "بعد بكرة") mathematically with timezone awareness (`Africa/Cairo`), ensuring zero date hallucination by the LLM.
+
+### Conversational Memory (`src/agents/memory.py`)
+- **Engine**: In-memory per-user sliding window history keyed by sender WhatsApp JID, enabling natural multi-turn conversations.
 
 ---
 
@@ -146,9 +157,9 @@ chroma_db/
 |:--------|:--------|:-----|
 | **FastAPI** | Async Python web framework | $0 |
 | **PyMuPDF (fitz)** | PDF text and image extraction | $0 |
-| **Pillow** | Image processing and generation | $0 |
+| **Pillow** | Image processing and compression | $0 |
 | **WeasyPrint** | HTML/CSS to PDF conversion | $0 |
-| **LangChain** | RAG utilities, text splitters | $0 |
+| **LangChain** | Tool calling, schema definitions | $0 |
 | **FFmpeg** | Video/audio processing | $0 |
 | **pytest** | Testing framework | $0 |
 | **Docker** | Containerization | $0 |

@@ -105,29 +105,30 @@ Evolution API will be accessible at `http://localhost:8080`.
 
 ---
 
-## Step 6: Set Up Google Calendar
+## Step 6: Set Up Google APIs (Calendar & Drive)
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (e.g., "College Assistant").
-3. Enable the **Google Calendar API**.
+3. Enable both the **Google Calendar API** and the **Google Drive API**.
 4. Go to **APIs & Services → Credentials**:
    - Click **Create Credentials** &rarr; **OAuth client ID**.
    - Application type: **Desktop app**.
    - Download the JSON file and rename it to `credentials.json` in your project root.
-5. Generate your OAuth token:
+5. Generate your combined OAuth token:
    ```bash
-   # Run the calendar authorization helper
-   python setup_calendar.py
+   # Authorizes Google Calendar & Google Drive (Read-Only)
+   python setup_google.py
    ```
-   A browser window will open asking you to sign in with your Google Account and grant Calendar access. This creates `token.json`.
-6. *(Important)* **Multi-User Shared Calendar (Option 1)**:
-   - Create a secondary calendar in Google Calendar (e.g. "College Exams & Labs").
-   - Under **Settings and sharing** for that calendar, copy its **Calendar ID** (e.g. `xyz...@group.calendar.google.com`).
-   - Add it to your `.env`:
+   A browser window will open asking you to sign in with your Google Account and grant Calendar and Drive permissions. This creates `token.json`.
+6. Configure Calendar & Drive IDs in `.env`:
+   - **Google Calendar**: Create a secondary calendar in Google Calendar (e.g. "College Exams & Labs"). Under **Settings and sharing**, copy its **Calendar ID** (e.g. `xyz...@group.calendar.google.com`).
+   - **Google Drive**: Open your college materials folder in Google Drive. Copy the folder ID from the URL (`drive.google.com/drive/folders/<FOLDER_ID>`).
+   - Add them to `.env`:
      ```bash
      GOOGLE_CALENDAR_ID=xyz...@group.calendar.google.com
+     GOOGLE_DRIVE_FOLDER_ID=your_drive_root_folder_id
+     TIMEZONE=Africa/Cairo
      ```
-   - Share the public or view link with your students so everyone sees the updates automatically!
 7. **Security Note**:
    - `credentials.json` and `token.json` contain sensitive OAuth secrets and are permanently excluded by `.gitignore`. **Never commit them to GitHub.**
 
@@ -160,25 +161,22 @@ docker-compose up -d python-backend
 curl http://localhost:8000/health
 ```
 
-### Direct Query (Test without WhatsApp)
+### Drive Search Verification
 ```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d "{\"question\": \"What is polymorphism in OOP?\"}"
-```
-
-### Schedule Verification
-```bash
-curl http://localhost:8000/schedule
+curl "http://localhost:8000/drive/search?q=lecture"
 ```
 
 ### WhatsApp Commands
 | Action | Message / Command | Description |
 |:-------|:------------------|:------------|
-| **View Schedule** | `/schedule` or `جدول` | Returns upcoming exams/labs from the shared calendar |
+| **View Schedule** | `/schedule` or `جدول` | Returns upcoming exams, labs, and deadlines from the shared calendar |
+| **Add / Remind Event** | `Remind me tomorrow at 3pm to study for quiz` | Calculates exact datetime, adds to Google Calendar, and saves your verbatim text in the description |
 | **Delete Single Event** | `/delete [Subject]` or `احذف امتحان [المادة]` | Removes matching event from calendar (bilingual matching) |
 | **Bulk Delete** | `delete all exam schedule` or `احذف كل الامتحانات` | Clears all events in the semester window |
 | **Add Timetable Image** | Send photo of timetable (DM or Group) | AI parses subjects, dates, and times and syncs to Google Calendar |
+| **Explore Drive Subjects** | `list subjects` or `وريني المواد` | Dynamically lists subjects and folders in your Google Drive |
+| **Explore Folder Contents** | `open lectures folder` or `كام محاضرة في [المادة]؟` | Traverses course directories, counts files, and outputs direct Drive links |
+| **Search Study Materials** | `find transmission media midterm` | Searches Drive index for matching PDFs, slides, and notes |
 | **Ask Question** | Send any study question or photo | Generates an AI answer with citations |
 
 ---

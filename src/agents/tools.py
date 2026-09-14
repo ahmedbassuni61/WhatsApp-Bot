@@ -83,7 +83,7 @@ class AddEventInput(BaseModel):
         default="other",
         description="One of: exam, lecture, lab, section, deadline, other",
     )
-    description: Optional[str] = Field(default="", description="Additional notes")
+    description: Optional[str] = Field(default="", description="The student's original message or announcement text verbatim, plus any additional notes.")
 
 
 class DeleteEventInput(BaseModel):
@@ -187,7 +187,8 @@ async def add_calendar_event(
     description: str = "",
 ) -> str:
     """Add an academic event to Google Calendar.
-    Use when the student wants to add, schedule, or set a reminder for an exam, lecture, lab, deadline, or any event."""
+    Use when the student wants to add, schedule, or set a reminder for an exam, lecture, lab, deadline, or any event.
+    Always pass the student's original message verbatim in the description field."""
     logger.info("🔧 add_calendar_event(title='%s', date='%s', time='%s', type='%s')", title, date, time_start, event_type)
     event_data = {
         "title": title,
@@ -451,6 +452,10 @@ async def search_drive(query: str) -> str:
     except Exception as e:
         logger.error("  ✗ search_drive failed: %s", e)
         return f"⚠️ Drive search error: {e}"
+
+
+# Backwards compatibility alias
+search_college_drive = search_drive
 
 
 # ------------------------------------------------------------------ #
