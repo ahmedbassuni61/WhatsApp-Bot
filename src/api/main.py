@@ -43,6 +43,7 @@ from src.tools.time_tool import time_tool
 from src.whatsapp.bot import WhatsAppBot
 from src.whatsapp.calendar_sync import CalendarSync
 from src.whatsapp.evolution_client import EvolutionClient
+from src.whatsapp.interactive import InteractiveHandler
 from src.drive import GoogleDriveClient
 from src.drive.drive_indexer import drive_indexer
 
@@ -127,6 +128,14 @@ async def lifespan(app: FastAPI):
     calendar_sync = CalendarSync()
     drive_client = GoogleDriveClient()
 
+    # Interactive menu handler (Drive browser, schedule polls)
+    interactive_handler = InteractiveHandler(
+        evolution_client=evolution_client,
+        drive_client=drive_client,
+        calendar_sync=calendar_sync,
+    )
+    whatsapp_bot.interactive_handler = interactive_handler
+
     # Wire tool dependencies so the agent can call calendar / LLM / Drive
     init_tools(
         calendar_sync=calendar_sync,
@@ -167,7 +176,7 @@ async def lifespan(app: FastAPI):
             logger.info("WhatsApp connection state: %s", state)
             await evolution_client.set_webhook(
                 webhook_url=webhook_url,
-                events=["MESSAGES_UPSERT", "CONNECTION_UPDATE"],
+                events=["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE"],
             )
             logger.info("✅ Evolution API webhook configured: %s", webhook_url)
             break

@@ -188,6 +188,39 @@ class EvolutionClient:
         logger.info("Document '%s' sent to %s", filename, to_jid)
         return resp.json()
 
+    async def send_poll(
+        self,
+        to_jid: str,
+        question: str,
+        options: list[str],
+        selectable_count: int = 1,
+    ) -> dict:
+        """
+        Send a single/multi-select poll message.
+
+        Polls are the standard interactive selection UI across all WhatsApp clients.
+
+        Args:
+            to_jid: WhatsApp JID
+            question: Poll question / header text
+            options: List of option strings (max 12)
+            selectable_count: How many options can be selected (1 = single-select)
+        """
+        payload = {
+            "number": to_jid,
+            "name": question,
+            "selectableCount": selectable_count,
+            "values": options[:12],
+        }
+        resp = await self._client.post(
+            f"/message/sendPoll/{self.instance_name}",
+            json=payload,
+        )
+        resp.raise_for_status()
+        logger.info("Poll sent to %s (%d options)", to_jid, len(options[:12]))
+        return resp.json()
+
+
     # ------------------------------------------------------------------ #
     # Presence (typing indicators — reduces ban risk)
     # ------------------------------------------------------------------ #
@@ -250,6 +283,7 @@ class EvolutionClient:
         if events is None:
             events = [
                 "MESSAGES_UPSERT",
+                "MESSAGES_UPDATE",
                 "CONNECTION_UPDATE",
             ]
 

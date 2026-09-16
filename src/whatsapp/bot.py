@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from src.whatsapp.evolution_client import EvolutionClient
+from src.whatsapp.interactive import MENU_TRIGGERS, extract_interactive_response
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ class WhatsAppBot:
         # Callbacks for processing messages (will be set by the app)
         self._on_direct_message = None
         self._on_group_message = None
+        # Interactive handler for poll callbacks (set by main.py)
+        self.interactive_handler = None
         # Message dedup: prevent double-processing when Evolution API retries
         self._seen_message_ids: set[str] = set()
 
@@ -70,12 +73,17 @@ class WhatsAppBot:
         """
         event = payload.get("event", "")
 
-        # Only process incoming messages
-        if event != "messages.upsert":
+        # Process incoming messages and message updates (e.g. poll votes)
+        if event not in ("messages.upsert", "messages.update"):
             logger.debug("Ignoring non-message event: %s", event)
             return
 
         data = payload.get("data", {})
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        if not isinstance(data, dict):
+            return
+
         key = data.get("key", {})
         remote_jid = key.get("remoteJid", "")
         from_me = key.get("fromMe", True)
@@ -116,6 +124,37 @@ class WhatsAppBot:
         message_type = data.get("messageType", "unknown")
         sender_name = data.get("pushName", "Unknown")
 
+        # ---- Check for interactive poll responses first ---- #
+        interactive = extract_interactive_response(message_obj, data=data)
+        if interactive and self.interactive_handler:
+            action_id = interactive["id"]
+            display_text = interactive["text"]
+
+            # For poll votes: resolve vote text → action via pending poll mapping
+            if interactive["type"] == "poll" and not action_id:
+                resolved = self.interactive_handler.resolve_poll_vote(remote_jid, display_text)
+                if resolved:
+                    action_id = resolved["action"]
+                else:
+                    logger.debug("Poll vote '%s' didn't match any pending option", display_text[:40])
+                    # Don't block — fall through to normal message handling
+                    interactive = None
+
+            if interactive:
+                logger.info(
+                    "\n" + "═" * 70 + "\n"
+                    "🔘 [%s] %s (%s): interactive %s → action='%s' text='%s'",
+                    "GROUP" if remote_jid.endswith("@g.us") else "DM",
+                    sender_name, remote_jid[:25],
+                    interactive["type"], action_id[:50], display_text[:40],
+                )
+                await self.interactive_handler.handle_callback(
+                    jid=remote_jid,
+                    action_id=action_id,
+                    display_text=display_text,
+                )
+                return
+
         # Extract media if present
         media_info = self._extract_media_info(data, message_obj, message_type)
         if media_info and not media_info.get("base64"):
@@ -152,6 +191,25 @@ class WhatsAppBot:
             message_type,
             media_tag,
         )
+
+        # ---- Check for menu trigger words ---- #
+        if text and self.interactive_handler and self.interactive_handler.is_menu_trigger(text):
+            logger.info("  → Menu trigger detected, showing interactive menu")
+            await self.interactive_handler.send_main_menu(remote_jid)
+            return
+
+        # ---- Check if text is a shortcut for a pending interactive poll (e.g. "1", "2", "back") ---- #
+        if text and self.interactive_handler:
+            resolved = self.interactive_handler.resolve_poll_vote(remote_jid, text)
+            if resolved:
+                action_id = resolved["action"]
+                logger.info("  → Interactive text shortcut '%s' matched action '%s'", text[:30], action_id)
+                await self.interactive_handler.handle_callback(
+                    jid=remote_jid,
+                    action_id=action_id,
+                    display_text=text,
+                )
+                return
 
         # Route to appropriate handler
         if is_group:
