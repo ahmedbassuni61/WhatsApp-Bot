@@ -50,10 +50,3 @@ class DeleteEventResponse(BaseModel):
     """Response after deleting calendar events."""
     deleted_events: list[str] = Field(default_factory=list)
     message: str = ""
-
-
-class IngestRequest(BaseModel):
-    """File ingestion request."""
-    file_path: str
-    content_type: str = "lecture"  # lecture, exam, section, handwritten
-    course: str | None = None

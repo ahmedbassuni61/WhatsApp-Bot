@@ -6,8 +6,6 @@ what parameters to provide when calling it.  Dependencies are wired
 at startup via ``init_tools()``.
 """
 
-import base64 as b64mod
-import io
 import json
 import logging
 from typing import Optional
@@ -15,6 +13,7 @@ from typing import Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from src.drive.drive_client import format_file_size
 from src.tools.time_tool import time_tool
 
 logger = logging.getLogger(__name__)
@@ -25,7 +24,6 @@ logger = logging.getLogger(__name__)
 _calendar_sync = None
 _llm_router = None
 _drive_client = None
-_drive_indexer = None
 _current_image = None  # PIL Image for the current message (set per request)
 
 
@@ -34,14 +32,13 @@ def init_tools(
     calendar_sync=None,
     llm_router=None,
     drive_client=None,
-    drive_indexer=None,
+    **_kwargs,
 ):
     """Wire up runtime dependencies. Called once during app startup."""
-    global _calendar_sync, _llm_router, _drive_client, _drive_indexer
+    global _calendar_sync, _llm_router, _drive_client
     _calendar_sync = calendar_sync
     _llm_router = llm_router
     _drive_client = drive_client
-    _drive_indexer = drive_indexer
     logger.info("Agent tools initialized (Calendar, LLM Router, Drive)")
 
 
@@ -93,12 +90,6 @@ class DeleteEventInput(BaseModel):
     date: Optional[str] = Field(default=None, description="Optional date filter in YYYY-MM-DD format")
 
 
-class AnswerQuestionInput(BaseModel):
-    """Input for answering an academic question."""
-
-    question: str = Field(description="The student's academic/study question to answer")
-
-
 class ParseTimetableInput(BaseModel):
     """Input for parsing a timetable image."""
 
@@ -127,7 +118,7 @@ class SearchDriveInput(BaseModel):
 
 
 # ------------------------------------------------------------------ #
-# Schedule-parsing prompt (reused from group_listener)
+# Schedule-parsing prompt for multimodal timetable analysis
 # ------------------------------------------------------------------ #
 
 _SCHEDULE_PARSE_PROMPT = """You are an intelligent college schedule parsing assistant.
@@ -240,25 +231,6 @@ async def delete_calendar_event(query: str, date: Optional[str] = None) -> str:
     except Exception as e:
         logger.error("  ✗ delete_calendar_event failed: %s", e)
         return f"⚠️ Failed to delete event: {e}"
-
-
-@tool(args_schema=AnswerQuestionInput)
-async def answer_question(question: str) -> str:
-    """Answer an academic or college study question.
-    Use for any educational question, homework help, concept explanation, or general knowledge.
-    If there is an attached image, it will be included automatically."""
-    logger.info("🔧 answer_question(question='%s')", question[:80])
-    try:
-        prompt = (
-            "You are a helpful college study assistant. "
-            "Answer the following student question concisely:\n\n" + question
-        )
-        result = await _llm_router.generate(prompt, image=_current_image)
-        logger.info("  → response length: %d chars", len(result))
-        return result
-    except Exception as e:
-        logger.error("  ✗ answer_question failed: %s", e)
-        return f"⚠️ Could not generate answer: {e}"
 
 
 @tool(args_schema=ParseTimetableInput)
@@ -420,8 +392,6 @@ async def search_drive(query: str) -> str:
     Use when looking for a specific exam, lecture file, sheet, or topic across the entire Drive."""
     logger.info("🔧 search_drive(query='%s')", query)
     try:
-        from src.drive.drive_client import format_file_size
-
         items = await _drive_client.search_drive_api(query, max_results=12)
         if not items:
             return f"🔍 No files or folders found matching: *{query}* on Google Drive."
@@ -452,10 +422,6 @@ async def search_drive(query: str) -> str:
     except Exception as e:
         logger.error("  ✗ search_drive failed: %s", e)
         return f"⚠️ Drive search error: {e}"
-
-
-# Backwards compatibility alias
-search_college_drive = search_drive
 
 
 # ------------------------------------------------------------------ #

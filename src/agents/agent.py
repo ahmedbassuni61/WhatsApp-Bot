@@ -7,8 +7,6 @@ inspects the available tools and their Pydantic schemas, and decides which tool
 to invoke.  If all providers fail, a basic text fallback is attempted.
 """
 
-import base64 as b64mod
-import io
 import logging
 import time
 from typing import Any

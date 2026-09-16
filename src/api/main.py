@@ -43,7 +43,6 @@ from src.tools.time_tool import time_tool
 from src.whatsapp.bot import WhatsAppBot
 from src.whatsapp.calendar_sync import CalendarSync
 from src.whatsapp.evolution_client import EvolutionClient
-from src.whatsapp.group_listener import GroupListener
 from src.drive import GoogleDriveClient
 from src.drive.drive_indexer import drive_indexer
 
@@ -85,7 +84,6 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 # ------------------------------------------------------------------ #
 evolution_client: EvolutionClient | None = None
 whatsapp_bot: WhatsAppBot | None = None
-group_listener: GroupListener | None = None
 calendar_sync: CalendarSync | None = None
 drive_client: GoogleDriveClient | None = None
 
@@ -115,7 +113,7 @@ def _decode_image(media: dict | None) -> PIL.Image.Image | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    global evolution_client, whatsapp_bot, group_listener, calendar_sync, drive_client
+    global evolution_client, whatsapp_bot, calendar_sync, drive_client
 
     logger.info("🚀 Starting College Assistant AI...")
 
@@ -126,7 +124,6 @@ async def lifespan(app: FastAPI):
         evolution_client=evolution_client,
         announcement_group_jid=announcement_jid,
     )
-    group_listener = GroupListener(announcement_group_jid=announcement_jid)
     calendar_sync = CalendarSync()
     drive_client = GoogleDriveClient()
 
@@ -135,7 +132,6 @@ async def lifespan(app: FastAPI):
         calendar_sync=calendar_sync,
         llm_router=llm_router,
         drive_client=drive_client,
-        drive_indexer=drive_indexer,
     )
 
     # Google Drive status log

@@ -1,1 +1,1 @@
-"""WhatsApp integration layer — Evolution API client, bot handler, group listener, calendar sync."""
+"""WhatsApp integration layer — Evolution API client, bot handler, and Google Calendar sync."""

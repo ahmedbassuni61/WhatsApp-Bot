@@ -12,7 +12,6 @@ The bot distinguishes between:
 
 import asyncio
 import logging
-import random
 
 from src.whatsapp.evolution_client import EvolutionClient
 

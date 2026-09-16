@@ -22,7 +22,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 load_dotenv()
@@ -181,15 +180,6 @@ class CalendarSync:
         except Exception as e:
             logger.error("Failed to create calendar event: %s", e)
             return None
-
-    async def create_events_batch(self, events: list[dict]) -> list[dict]:
-        """Create multiple calendar events from a list of parsed events."""
-        created = []
-        for event_data in events:
-            result = await self.create_event(event_data)
-            if result:
-                created.append(result)
-        return created
 
     async def get_upcoming_events(self, days: int = 7, max_results: int = 20) -> list[dict]:
         """
