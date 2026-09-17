@@ -22,7 +22,8 @@ MENU_TRIGGERS = frozenset({
     "قائمة", "الأوامر", "القائمة",
 })
 
-# Max poll options (WhatsApp limit: 12)
+# Max poll options (Evolution API practical limit; WhatsApp official max is 12
+# but some API versions reject >8)
 _MAX_POLL_OPTIONS = 12
 
 
@@ -216,15 +217,16 @@ class InteractiveHandler:
         poll_options = []
         poll_mapping = {}
 
-        # Add subfolders as options
+        # Add subfolders as options (truncate names for WhatsApp poll limit)
         for sf in subfolders[:(_MAX_POLL_OPTIONS - 2)]:  # Reserve 2 slots for nav
-            option_text = f"📁 {sf['name']}"
+            name = sf['name'][:93]  # Truncate — leaves room for "📁 " prefix
+            option_text = f"📁 {name}"
             poll_options.append(option_text)
             poll_mapping[option_text] = {
                 "action": f"drive_folder:{sf['id']}",
             }
 
-        # Add navigation options
+        # Always add both navigation options to guarantee ≥ 2 poll options
         if len(stack) > 1:
             poll_options.append("⬅️ Back")
             poll_mapping["⬅️ Back"] = {"action": "drive_back"}
@@ -232,24 +234,36 @@ class InteractiveHandler:
         poll_options.append("📋 Main Menu")
         poll_mapping["📋 Main Menu"] = {"action": "menu"}
 
+        # Safety net: if only 1 option (e.g. lost stack after restart + no subfolders),
+        # prepend a "⬅️ Back to Root" so the poll is valid (min 2 options)
+        if len(poll_options) < 2:
+            poll_options.insert(0, "⬅️ Back to Root")
+            poll_mapping["⬅️ Back to Root"] = {"action": "drive_root"}
+
         # Store mapping for this user
         self._pending_polls[jid] = poll_mapping
 
-        if not subfolders:
-            # No subfolders — just nav poll
+        poll_question = (
+            f"📍 {folder_name} — Navigate:"
+            if not subfolders
+            else f"📂 {folder_name} — Select a folder:"
+        )
+
+        try:
             await self.client.send_poll(
                 to_jid=jid,
-                question=f"📍 {folder_name} — Navigate:",
+                question=poll_question,
                 options=poll_options,
                 selectable_count=1,
             )
-        else:
-            await self.client.send_poll(
-                to_jid=jid,
-                question=f"📂 {folder_name} — Select a folder:",
-                options=poll_options,
-                selectable_count=1,
-            )
+        except Exception as e:
+            logger.warning("Poll send failed for folder '%s', falling back to text menu: %s", folder_name, e)
+            # Fallback: send options as a numbered text list
+            lines = ["📂 *Navigate:*\n"]
+            for i, opt in enumerate(poll_options, 1):
+                lines.append(f"{i}. {opt}")
+            lines.append("\n_Reply with a number to choose._")
+            await self.client.send_text(jid, "\n".join(lines))
 
     # ------------------------------------------------------------------ #
     # Navigation helpers

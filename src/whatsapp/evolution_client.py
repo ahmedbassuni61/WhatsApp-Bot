@@ -206,18 +206,43 @@ class EvolutionClient:
             options: List of option strings (max 12)
             selectable_count: How many options can be selected (1 = single-select)
         """
+        # Sanitize options: truncate to 100 chars (WhatsApp limit)
+        clean = [opt[:100] for opt in options[:12] if opt and opt.strip()]
+
+        # Deduplicate (WhatsApp rejects duplicate option text)
+        seen: dict[str, int] = {}
+        deduped: list[str] = []
+        for opt in clean:
+            if opt in seen:
+                seen[opt] += 1
+                deduped.append(f"{opt} ({seen[opt]})")
+            else:
+                seen[opt] = 1
+                deduped.append(opt)
+
+        if len(deduped) < 2:
+            raise ValueError(
+                f"Poll requires at least 2 options, got {len(deduped)}: {deduped}"
+            )
+
         payload = {
             "number": to_jid,
-            "name": question,
+            "name": question[:255],
             "selectableCount": selectable_count,
-            "values": options[:12],
+            "values": deduped,
         }
         resp = await self._client.post(
             f"/message/sendPoll/{self.instance_name}",
             json=payload,
         )
+        if resp.status_code >= 400:
+            body = resp.text
+            logger.error(
+                "sendPoll failed (%s) for %s: %s | payload=%s",
+                resp.status_code, to_jid, body[:500], deduped,
+            )
         resp.raise_for_status()
-        logger.info("Poll sent to %s (%d options)", to_jid, len(options[:12]))
+        logger.info("Poll sent to %s (%d options)", to_jid, len(deduped))
         return resp.json()
 
 
