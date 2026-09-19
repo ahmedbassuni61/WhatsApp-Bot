@@ -1,10 +1,16 @@
 """
 LangChain Agent — routes student messages to the right tool via LLM tool-calling.
 
-Replaces the 100+ lines of manual keyword matching in ``main.py`` with a single
-``process_message()`` call.  Gemini sees the student's message (text and/or image),
-inspects the available tools and their Pydantic schemas, and decides which tool
-to invoke.  If all providers fail, a basic text fallback is attempted.
+Uses a LangGraph StateGraph with an adversarial reflection loop to validate
+responses before they reach the user.  The graph structure is:
+
+    router ↔ executor  (tool-calling loop)
+         ↓
+    reflector  (end-of-loop quality gate that hunts for problems)
+         ↓
+    committer  (creates pending events in Google Calendar + conflict detection)
+         ↓
+    responder  (structured final output with times and conflict warnings)
 """
 
 import logging
@@ -12,9 +18,10 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from src.agents.llm_router import extract_text_from_content, llm_router, optimize_and_encode_image
+from src.agents.graph import build_agent_graph, init_graph
+from src.agents.llm_router import llm_router, optimize_and_encode_image
 from src.agents.memory import memory
 from src.agents.tools import ALL_TOOLS, clear_current_image, set_current_image
 from src.tools.time_tool import time_tool
@@ -48,7 +55,10 @@ RULES:
 2. For schedule queries (show / what's next / my schedule) → view_schedule.
 3. For add / remind / set deadline / save exam date → add_calendar_event (always pass the student's original message text in the `description` parameter).
 4. For delete / remove / cancel / امسح / احذف → ALWAYS use delete_calendar_event. NEVER call view_schedule for a delete request. If vague like "delete this", call delete_calendar_event with query='all'.
-5. ANNOUNCEMENTS & IMAGES WITH DATES/DEADLINES: When a student sends an image or text containing an announcement, exam date, lecture schedule, or deadline, YOU MUST CALL a calendar tool (`add_calendar_event` or `parse_timetable_image`) to add it to Google Calendar! After tool execution, confirm to the student what you added and summarize the announcement.
+5. TIMETABLE IMAGES & SCHEDULE ANNOUNCEMENTS:
+   • When a student sends a timetable or class schedule image: YOU MUST CALL `parse_timetable_image()`. The system automatically extracts, reflects, and syncs all events to Google Calendar.
+   • NEVER call `add_calendar_event()` individually for events extracted by `parse_timetable_image()`! Once `parse_timetable_image()` is called, all schedule events are queued and synced automatically.
+   • When a student sends a single date, deadline, or announcement in text, call `add_calendar_event()`.
 6. GOOGLE DRIVE EXPLORATION & STUDY MATERIALS:
    • To see what subjects, courses, or semesters exist: ALWAYS call `list_drive_folder()` (with no args) to see the root directory.
    • To enter a subject or subfolder: call `list_drive_folder(folder_id=...)` using the folder ID or `list_drive_folder(folder_name=...)`.
@@ -65,6 +75,35 @@ RULES:
 11. For relative times (e.g. "next hour", "tomorrow", "كمان ساعة", "بكرة") compute the exact date/time.
 
 {time_context}"""
+
+
+# ------------------------------------------------------------------ #
+# Compiled LangGraph graph (lazy singleton)
+# ------------------------------------------------------------------ #
+_graph = None
+_graph_initialized = False
+
+
+def _ensure_graph_deps(calendar_sync=None):
+    """Ensure graph dependencies are wired.  Called lazily on first use."""
+    global _graph_initialized
+    if _graph_initialized:
+        return
+    init_graph(
+        llm_router=llm_router,
+        calendar_sync=calendar_sync,
+        tool_map=TOOL_MAP,
+        all_tools=ALL_TOOLS,
+    )
+    _graph_initialized = True
+
+
+def _get_graph():
+    """Build or return the compiled LangGraph agent graph."""
+    global _graph
+    if _graph is None:
+        _graph = build_agent_graph()
+    return _graph
 
 
 # ------------------------------------------------------------------ #
@@ -126,7 +165,7 @@ async def process_message(text: str, image: Any | None = None, user_id: str = ""
 
 
 async def _run_agent(text: str, image: Any | None, user_id: str = "") -> str:
-    """Build the model, send the message, execute any tool calls in an agentic loop."""
+    """Build the initial state and invoke the LangGraph agent graph."""
     # ---- messages ------------------------------------------------ #
     time_context = time_tool.get_time_context_prompt()
     system = SystemMessage(content=SYSTEM_PROMPT.format(time_context=time_context))
@@ -155,73 +194,31 @@ async def _run_agent(text: str, image: Any | None, user_id: str = "") -> str:
         if history_msgs:
             logger.info("│ Memory     : %d past messages for %s", len(history_msgs), user_id[:25])
 
-    messages: list[BaseMessage] = [system, *history_msgs, human]
-    max_iterations = 8
-    executed_results: list[str] = []
+    messages = [system, *history_msgs, human]
 
-    for iteration in range(1, max_iterations + 1):
-        logger.info("│ 🔄 AGENT LOOP iteration %d/%d", iteration, max_iterations)
+    # ---- invoke the LangGraph agent graph ----------------------- #
+    graph = _get_graph()
+    initial_state = {
+        "messages": messages,
+        "user_id": user_id,
+        "image": image,
+        "iteration": 0,
+        "reflection_count": 0,
+        "pending_events": [],
+        "committed_events": [],
+        "conflicts": [],
+        "reflection_verdict": "pass",
+        "needs_reflection": False,
+        "final_response": "",
+    }
 
-        response, llm_ms = await llm_router.invoke_agent(
-            messages=messages,
-            tools=ALL_TOOLS,
-            has_image=(image is not None),
-        )
+    result = await graph.ainvoke(initial_state)
+    final = result.get("final_response", "")
 
-        tool_calls = getattr(response, "tool_calls", None) or []
-        tool_names = [tc["name"] for tc in tool_calls] if tool_calls else []
+    if final:
+        return final
 
-        if tool_names:
-            logger.info("│ LLM decided (%.0fms): TOOL CALL → %s", llm_ms, tool_names)
-        elif response.content:
-            logger.info("│ LLM decided (%.0fms): DIRECT RESPONSE (%d chars)", llm_ms, len(str(response.content)))
-        else:
-            logger.info("│ LLM decided (%.0fms): EMPTY RESPONSE", llm_ms)
-
-        # ---- case 1: no tool calls -> final response from model ---- #
-        if not tool_calls:
-            final_text = extract_text_from_content(response.content)
-            if final_text:
-                return final_text
-            if executed_results:
-                return "\n\n".join(executed_results)
-            return "I'm not sure how to help with that. Try asking a question or managing your schedule! 📚"
-
-        # ---- case 2: tool calls requested -> execute & feed back ---- #
-        messages.append(response)
-
-        for i, tc in enumerate(tool_calls, 1):
-            name = tc["name"]
-            args = tc.get("args", {})
-            call_id = tc.get("id") or f"call_{iteration}_{i}"
-
-            logger.info("│")
-            logger.info("│ 🛠️  TOOL CALL [%d/%d] : %s", i, len(tool_calls), name.upper())
-            logger.info("│ 📦 ARGUMENTS : %s", args)
-
-            tool_fn = TOOL_MAP.get(name)
-            if not tool_fn:
-                logger.error("│ ❌ UNKNOWN TOOL: %s", name)
-                res_str = f"⚠️ Unknown action: {name}"
-            else:
-                try:
-                    t_tool = time.monotonic()
-                    res_raw = await tool_fn.ainvoke(args)
-                    tool_ms = (time.monotonic() - t_tool) * 1000
-                    res_str = str(res_raw)
-                    preview = (res_str[:120] + "…") if len(res_str) > 120 else res_str
-                    logger.info("│ ✅ RESULT (%.0fms): %s", tool_ms, preview)
-                    logger.info("│")
-                except Exception as tool_err:
-                    logger.error("│ ❌ FAILED: %s", tool_err)
-                    res_str = f"⚠️ {name} error: {tool_err}"
-
-            executed_results.append(res_str)
-            messages.append(ToolMessage(content=res_str, tool_call_id=call_id))
-
-    if executed_results:
-        return "\n\n".join(executed_results)
-    return "I completed the requested actions. 📚"
+    return "I'm not sure how to help with that. Try asking a question or managing your schedule! 📚"
 
 
 async def _fallback(text: str) -> str:
@@ -237,4 +234,5 @@ async def _fallback(text: str) -> str:
     except Exception as err:
         logger.error("│ Fallback also FAILED: %s", err)
         return "Sorry, I'm having trouble right now. Please try again in a moment. 🔧"
+
 

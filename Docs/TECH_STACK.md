@@ -9,8 +9,10 @@ Every technology in this project was selected for **zero cost** operation at mea
 A centralized, unified multi-LLM gateway with model pooling, memory caching, and automatic failover across free-tier providers.
 
 ### Primary Multimodal & Tool Reasoning: Google Gemini
-- **`gemini-3.5-flash` & `gemini-3.5-flash-lite`**:
-  - High-speed reasoning, full multimodal vision (timetable image OCR), generous request budget.
+- **`gemini-3.5-flash-lite`** (Default Priority Model):
+  - Ultra-fast latency, high multimodal accuracy for timetable image OCR, and generous daily request limits. Configured with a 50s multimodal timeout for vision-heavy timetable analyses and a 45s transient cooldown to quickly bypass momentary upstream hiccups.
+- **`gemini-3.5-flash`**:
+  - High-tier multimodal reasoning fallback for complex parsing tasks.
 - **`gemini-2.5-flash` & `gemini-2.5-flash-lite`**:
   - Secondary multimodal failovers when higher tiers hit quotas or rate limits.
 
@@ -89,11 +91,50 @@ chroma_db/
 
 - **Cost**: $0 (open source)
 - **Why LangGraph over plain LangChain**:
-  - Explicit **state machine** with nodes and edges (vs implicit chain)
-  - Supports **cycles** (verification loop: ask → verify → re-ask)
-  - Built-in **human-in-the-loop** (user confirmation before image generation)
-  - Observable and debuggable execution graphs
-  - First-class support for multi-agent architectures
+  - Explicit **state machine** with nodes and edges (vs implicit chain).
+  - Supports **cycles** (adversarial reflection & auto-repair loop).
+  - Built-in **human-in-the-loop** (user confirmation before image generation).
+  - Observable and debuggable execution graphs.
+  - First-class support for multi-agent architectures.
+
+### The 5-Node StateGraph Architecture (`src/agents/graph.py`)
+
+```
+[User Message / Image]
+         │
+         ▼
+    ┌──────────┐    tool_calls     ┌────────────┐
+    │  Router  │ ─────────────────►│  Executor  │
+    │  (LLM)   │ ◄─────────────────│  (Tools)   │
+    └────┬─────┘    tool_output    └────────────┘
+         │
+         │ final text answer / completed tools
+         ▼
+    ┌──────────┐  fail (auto-repair / re-query)
+    │Reflector │ ─────────────────────────────────┐
+    │ (Critic) │                                  │
+    └────┬─────┘                                  ▼
+         │ pass                           (Back to Router)
+         ▼
+    ┌──────────┐                   ┌──────────────┐
+    │Committer │ ─────────────────►│ Respond Node │
+    │(CalSync) │  committed events │ (Structured) │
+    └──────────┘                   └──────────────┘
+```
+
+1. **`router` (LLM Reasoning)**: Evaluates user intent, conversation history, and available tools. Directs execution to tool invocation or produces conversational responses.
+2. **`executor` (Tool Execution)**: Runs calendar sync, timetable OCR, Drive operations, or RAG search. Captures candidate calendar events into `pending_events` rather than committing blindly.
+3. **`reflector` (Adversarial Reflection & Verification Gate)**:
+   - **Deterministic Guardrails**: Instant validation of dates (ISO YYYY-MM-DD, $\le 365$ days ahead), time boundaries (start < end), and auto-repair for inverted slots.
+   - **Vision & Timetable Verification**: Deeply inspects physical timetable columns (e.g. `8:30-9:30` ... `19:30-20:30`) against the original image to verify subjects, avoid cross-column contamination, and differentiate back-to-back lectures from conflicts.
+   - **Loop Control**: Allows up to 2 correction cycles with explicit critique injection, then fails open to prevent infinite loops.
+4. **`committer` (Sanitized Commit & Non-Blocking Conflict Detection)**:
+   - Commits validated events to Google Calendar.
+   - Applies **multi-session same-day deduplication** (preserves distinct lecture/lab periods of the same course on the same date).
+   - Detects true conflicts between different courses (excluding self-copies and all-day notes).
+5. **`respond_node` (Enforced Structured Output)**:
+   - Formats timetable responses into a clean, day-grouped schedule with exact start and end times (`11:30 → 12:30`), locations (`📍 مدرج 3`), and universal academic emojis (`📚`, `🔬`, `📝`, `👥`, `⏰`, `💬`, `📌`).
+   - Appends bilingual conflict warnings at the very end of the message when clashes are detected.
 
 ---
 
@@ -132,7 +173,8 @@ chroma_db/
 - **Engine**:
   - Auto-creates color-coded events with reminders (1 hour and 15 mins prior).
   - Preserves original WhatsApp messages or announcement text verbatim in the event's `description`.
-  - Duplicate detection based on title and date window.
+  - **Multi-Session Same-Day Support**: `_is_duplicate` validates `title`, `date`, and `time_start`, accurately distinguishing back-to-back classes or morning/afternoon sessions of the same course.
+  - **Intelligent Conflict Resolver**: Cross-checks new events against existing schedules and current batches, normalizing tags (`[LECTURE]`, `[LAB]`, `محاضرة`, `معمل`) to eliminate false self-conflicts.
   - Intelligent deletion: bulk clearing, cross-language English ↔ Arabic translation, and LLM matching fallback.
 
 ### Google Drive API v3 (`src/drive/`)

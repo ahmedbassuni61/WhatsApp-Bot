@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from src.agents.agent import process_message
+from src.agents.agent import process_message, _ensure_graph_deps
 from src.agents.llm_router import llm_router
 from src.agents.tools import init_tools
 from src.api.models import (
@@ -142,6 +142,9 @@ async def lifespan(app: FastAPI):
         llm_router=llm_router,
         drive_client=drive_client,
     )
+
+    # Wire LangGraph graph dependencies (needs calendar_sync for commit_node)
+    _ensure_graph_deps(calendar_sync=calendar_sync)
 
     # Google Drive status log
     if drive_client.is_authorized():

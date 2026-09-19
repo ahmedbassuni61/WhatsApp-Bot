@@ -13,6 +13,9 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
 
 ### 📅 Multimodal Timetable Parsing & Shared Google Calendar
 - **AI Timetable OCR**: Send a photo of complex university exam schedules (Arabic or English). The bot parses all dates, subjects, times, and halls, and adds them directly to Google Calendar.
+- **Enforced Structured Schedule Output**: Always returns an aesthetically structured timetable with day headers, exact start and end times (`11:30 → 12:30`), hall locations (`📍 مدرج 3`), and universal high-visibility emojis (`📚 [LECTURE]`, `🔬 [LAB]`, `📝 [EXAM]`, `👥 [SECTION]`, `⏰ [DEADLINE]`).
+- **Multi-Session Same-Day Intelligence**: Accurately recognizes and schedules multiple lecture or lab periods of the same subject on the same day without false duplicate skipping.
+- **Intelligent Conflict Detection**: Identifies genuine room or time clashes between distinct courses, filtering out self-copies, and cleanly appends bilingual warnings at the very end of schedule additions.
 - **Verbatim Message Preservation**: The student's exact WhatsApp message or announcement text is saved verbatim into the calendar event's `description` field for full context.
 - **Shared Multi-User Calendar**: Syncs to a dedicated shared secondary Google Calendar. Unlimited students and faculty can subscribe via calendar link without individual OAuth logins.
 - **Intelligent Deletion**: Supports natural language deletion (`/delete math`, `احذف امتحان الرياضيات`) and bulk clearing (`delete all exam schedule`) with cross-language subject aliases and LLM fallback.
@@ -26,13 +29,16 @@ An agentic, multi-modal **College Assistant AI** accessible via WhatsApp. It bri
 ### ⏰ Timezone & Relative Time Intelligence (`src/tools/time_tool.py`)
 - **Deterministic Time Math**: Resolves relative time phrases ("tomorrow at 3pm", "كمان ساعتين", "Sunday next week", "بعد بكرة") mathematically with timezone awareness (`Africa/Cairo`), ensuring zero date/time hallucination.
 
-### 🧠 Agentic Loop & Conversation Memory (`src/agents/agent.py`, `memory.py`)
-- **Iterative Tool Execution**: Autonomous multi-step tool-calling loop (up to 8 iterations) where the agent can browse, search, verify, and act sequentially before responding.
+### 🧠 LangGraph StateGraph & Adversarial Reflection Loop (`src/agents/graph.py`, `reflector.py`)
+- **5-Node StateGraph Architecture**: Execution is governed by a compiled LangGraph state machine featuring `router`, `executor`, `reflector`, `committer`, and `respond_node`.
+- **Adversarial Reflection Quality Gate**: An active critic reviews answers before delivery to catch cross-column contamination from timetable images, auto-repair duplicates, and swap inverted times in place.
 - **Per-User Memory**: Context-aware conversation history per user JID so follow-up queries retain context.
 
 ### ⚡ Unified Multi-LLM Gateway (`src/agents/llm_router.py`)
+- **Default Priority on Gemini 3.5 Flash Lite**: Optimized priority queue starting with `gemini-3.5-flash-lite`, followed by `gemini-3.5-flash`, `gemini-2.5-flash`, and `gemini-2.5-flash-lite`.
+- **Extended Multimodal Timeouts**: Dedicated 50s execution windows for large vision payloads with transient 45s cooldowns to preserve high-tier availability.
 - **Single-Inference Responses**: General study questions, concept explanations, and homework help are answered directly in a single LLM pass (~1.2s), cutting API calls and latency in half.
-- **Automatic Quota Failover**: Seamlessly fails over across Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) and Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`) with automatic cooldown tracking.
+- **Automatic Quota Failover**: Seamlessly fails over across Google Gemini and Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`) with automatic cooldown tracking.
 - **Model Caching & Optimization**: Pre-caches model connections in memory and automatically downscales/compresses camera images from 10MB+ down to ~100KB JPEG before sending to the model.
 - **Combined Capacity**: ~3,500+ free queries per day across providers.
 

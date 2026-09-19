@@ -259,7 +259,7 @@ class CalendarSync:
         return "\n\n".join(lines)
 
     async def _is_duplicate(self, title: str, date_str: str | None, time_start: str | None) -> bool:
-        """Check if a similar event already exists on the same date."""
+        """Check if a similar event already exists on the same date at the same time."""
         if not date_str:
             return False
 
@@ -280,10 +280,26 @@ class CalendarSync:
             )
 
             existing = result.get("items", [])
-            # If any event on the same day has a similar title, it's a duplicate
             for e in existing:
-                if title.lower() in e.get("summary", "").lower():
-                    return True
+                summary = e.get("summary", "").lower()
+                title_lower = title.lower()
+                if title_lower in summary or summary in title_lower:
+                    e_start = e.get("start", {})
+                    e_dt_str = e_start.get("dateTime")
+
+                    # If both have time_start, only duplicate if times match
+                    # If two tasks with similar names have different times on the same day, they are NOT duplicates
+                    if time_start and e_dt_str:
+                        try:
+                            dt = datetime.fromisoformat(e_dt_str)
+                            if dt.strftime("%H:%M") == time_start:
+                                return True
+                            continue
+                        except Exception:
+                            pass
+                    elif not time_start and e_start.get("date"):
+                        # Both are all-day events with the same title
+                        return True
 
             return False
 

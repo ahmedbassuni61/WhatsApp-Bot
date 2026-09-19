@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Model configurations
 GEMINI_MODELS = [
-    ("Gemini 3.5 Flash", "gemini-3.5-flash"),
     ("Gemini 3.5 Flash Lite", "gemini-3.5-flash-lite"),
+    ("Gemini 3.5 Flash", "gemini-3.5-flash"),
     ("Gemini 2.5 Flash", "gemini-2.5-flash"),
     ("Gemini 2.5 Flash Lite", "gemini-2.5-flash-lite"),
 ]
@@ -165,11 +165,12 @@ class LLMRouter:
         messages: list[BaseMessage],
         tools: list[Any] | None = None,
         has_image: bool = False,
-        timeout: float = 25.0,
+        timeout: float | None = None,
     ) -> tuple[Any, float]:
         """
         Invoke the LLM with automatic failover across models.
         """
+        effective_timeout = timeout if timeout is not None else (50.0 if has_image else 30.0)
         models = self.get_models(has_image=has_image)
         if not models:
             raise RuntimeError("No LLM API keys configured or models available.")
@@ -181,15 +182,17 @@ class LLMRouter:
             try:
                 logger.info("│ Trying LLM : %s...", name)
                 runner = model.bind_tools(tools) if tools else model
-                response = await asyncio.wait_for(runner.ainvoke(messages), timeout=timeout)
+                response = await asyncio.wait_for(runner.ainvoke(messages), timeout=effective_timeout)
                 llm_ms = (time.monotonic() - t_llm) * 1000
                 logger.info("│ LLM Success: %s (%.0fms)", name, llm_ms)
                 # Clear quota cooldown on success
                 self._quota_cooldowns.pop(name, None)
                 return response, llm_ms
             except asyncio.TimeoutError:
-                logger.warning("│ ⚠️ Timeout (%.0fs) on %s — temporary 5-min cooldown", timeout, name)
-                self._quota_cooldowns[name] = time.monotonic() + self.quota_cooldown_seconds
+                # Timeouts are often temporary network latency; don't blacklist for 5 whole minutes
+                timeout_cooldown = 45.0
+                logger.warning("│ ⚠️ Timeout (%.0fs) on %s — temporary %.0fs cooldown", effective_timeout, name, timeout_cooldown)
+                self._quota_cooldowns[name] = time.monotonic() + timeout_cooldown
                 continue
             except Exception as e:
                 err_str = str(e).lower()

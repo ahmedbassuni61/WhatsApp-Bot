@@ -22,11 +22,11 @@ College students deal with fragmented study resources:
 - **Audio Processing**: Standalone audio recordings are transcribed and searchable
 - **Smart Retrieval**: Questions search across ALL sources simultaneously with source citations
 
-### 🤖 Agentic Multi-LLM Verification (LangGraph)
-- Questions are answered by **multiple LLMs independently** (Gemini, Groq/Llama, Cerebras)
-- Answers are compared for **consensus verification** — disagreements are flagged
-- A confidence score is attached to every answer
-- The entire reasoning cycle is a **LangGraph state machine** with observable steps
+### 🤖 Agentic Multi-LLM Verification & Reflection (LangGraph)
+- **LangGraph State Machine**: The reasoning and execution cycle is modeled as an observable **5-node StateGraph** (`router`, `executor`, `reflector`, `committer`, `respond_node`).
+- **Adversarial Reflection Quality Gate**: Responses and extracted timetable schedules are passed through an active critic before reaching the student to catch cross-column errors, swap inverted times, and deduplicate slots in place.
+- **Enforced Structured Schedule Output**: Always delivers a clean, day-grouped schedule with exact start & end times (`11:30 → 12:30`), hall locations (`📍 مدرج 3`), and universal academic emojis (`📚`, `🔬`, `📝`, `👥`, `⏰`, `💬`, `📌`).
+- **Conflict Detection**: Intelligently identifies true schedule clashes between distinct courses while ignoring self-copies and all-day notes, placing bilingual warnings at the very end of additions.
 
 ### 📱 WhatsApp Integration
 - Ask questions directly via WhatsApp (text or image of a problem)
@@ -41,6 +41,7 @@ College students deal with fragmented study resources:
 ### 📅 Schedule & Calendar Sync
 - Monitors announcement groups or direct messages for exam timetables, section announcements, and lecture updates.
 - **Multimodal Timetable Image Parsing**: Uses Gemini Flash Lite vision to read complex, multi-column university exam schedules in Arabic and English (e.g. Faculty of Engineering schedules) and automatically schedules exams with times, locations, and descriptions in seconds.
+- **Multi-Session Same-Day Support**: Accurately schedules multiple periods or labs of the same course occurring at different times on the same date without skipping them as duplicates.
 - **Verbatim Message Capture**: Saves the student's exact WhatsApp message or announcement text verbatim into the Google Calendar event `description`.
 - **Multi-User Shared Calendar**: Syncs to a dedicated shared Google Calendar, allowing students and faculty to subscribe and receive real-time updates and reminders.
 - **Natural Language & Bulk Event Deletion**: Delete events on-demand (`/delete math`, `delete all exam schedule`, `احذف امتحان الرياضيات`).
@@ -60,8 +61,8 @@ College students deal with fragmented study resources:
 
 | Concept | Implementation |
 |:--------|:---------------|
-| **Agentic AI** | LangChain multi-step tool-calling loop (up to 8 steps) with single-inference direct answers for study questions |
-| **Multi-LLM Gateway** | Automatic failover across Google Gemini (3.5 / 2.5 Flash & Lite) and Groq Cloud (Llama 3.3 70B, Mixtral) with quota cooldowns |
+| **Agentic AI** | LangGraph compiled StateGraph (5 nodes: router, executor, reflector, committer, respond_node) with cyclic reflection & auto-repair |
+| **Multi-LLM Gateway** | Automatic failover across Google Gemini (Flash Lite 3.5 default, 3.5 Flash, 2.5 Flash & Lite) and Groq Cloud (Llama 3.3 70B, Mixtral) |
 | **Google Drive Explorer** | Dynamic directory traversal, file counting, and SQLite caching via Google Drive API v3 |
 | **Time Intelligence** | Deterministic relative time parsing in `Africa/Cairo` timezone |
 | **RAG** | ChromaDB vector store + FastEmbed embeddings + semantic chunking |

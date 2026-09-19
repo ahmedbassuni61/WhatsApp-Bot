@@ -235,8 +235,9 @@ async def delete_calendar_event(query: str, date: Optional[str] = None) -> str:
 
 @tool(args_schema=ParseTimetableInput)
 async def parse_timetable_image(caption: str = "") -> str:
-    """Parse a timetable or schedule image and add the extracted events to Google Calendar.
-    Use when the student sends an image of a timetable, exam schedule, or class schedule."""
+    """Parse a timetable or schedule image and extract events for calendar sync.
+    Use when the student sends an image of a timetable, exam schedule, or class schedule.
+    Returns extracted events as JSON for review — events are committed after reflection."""
     logger.info("🔧 parse_timetable_image(caption='%s')", caption[:80] if caption else "(none)")
     if not _current_image:
         return "⚠️ No image attached to parse."
@@ -265,8 +266,9 @@ async def parse_timetable_image(caption: str = "") -> str:
         if not isinstance(events, list):
             events = []
 
-        # Validate, clean, and create calendar events
-        confirmations: list[str] = []
+        # Validate and clean events — but do NOT commit to calendar
+        # The graph's commit_node handles creation after the reflector passes
+        patched_events: list[dict] = []
         for ev in events:
             if not isinstance(ev, dict) or not ev.get("title"):
                 continue
@@ -285,29 +287,20 @@ async def parse_timetable_image(caption: str = "") -> str:
             if caption:
                 cleaned = time_tool.patch_event_time(cleaned, caption)
 
-            if cleaned.get("action") == "cancel":
-                deleted = await _calendar_sync.delete_events(
-                    query=cleaned["title"], date_str=cleaned.get("date")
-                )
-                if deleted:
-                    confirmations.append(f"🗑️ *Cancelled:* {', '.join(deleted)}")
-            else:
-                created = await _calendar_sync.create_event(cleaned)
-                if created:
-                    t = f" on {cleaned['date']}" if cleaned.get("date") else ""
-                    if cleaned.get("time_start"):
-                        t += f" at {cleaned['time_start']}"
-                    confirmations.append(f"• *{created.get('summary')}*{t}")
-                else:
-                    confirmations.append(f"• ℹ️ *{cleaned['title']}* (already on calendar)")
+            patched_events.append(cleaned)
 
-        if confirmations:
-            logger.info("  → parsed %d events from timetable image", len(confirmations))
-            return (
-                "📅 *Timetable Processed & Synced to Google Calendar!*\n\n"
-                + "\n".join(confirmations)
-                + "\n\n🔔 Automatic reminders have been scheduled."
-            )
+        if patched_events:
+            logger.info("  → extracted %d events from timetable (queued for auto-sync)", len(patched_events))
+            return json.dumps({
+                "status": "success",
+                "message": (
+                    f"Successfully extracted {len(patched_events)} events from the timetable. "
+                    "All events have been queued and are being automatically validated and synced to Google Calendar. "
+                    "DO NOT call add_calendar_event for these events — they are already handled."
+                ),
+                "events": patched_events,
+                "count": len(patched_events),
+            })
 
         logger.info("  → no schedule events found in image")
         return "📋 No schedule events found in this image."

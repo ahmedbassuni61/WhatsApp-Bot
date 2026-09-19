@@ -39,18 +39,24 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                   LANGGRAPH AGENT CYCLE                          │
 │                                                                  │
-│  ┌───────────┐    ┌────────────┐    ┌──────────────────┐        │
-│  │   Query   │───→│  Retrieve  │───→│  Multi-LLM       │        │
-│  │  Router   │    │  Context   │    │  Verification    │        │
-│  └───────────┘    └────────────┘    │  ┌─────────────┐ │        │
-│                                      │  │ Gemini      │ │        │
-│  ┌───────────┐    ┌────────────┐    │  │ Groq/Llama  │ │        │
-│  │  Export   │←───│  Answer    │←───│  │ Cerebras    │ │        │
-│  │  Image    │    │  Composer  │    │  └─────────────┘ │        │
-│  └───────────┘    └────────────┘    └──────────────────┘        │
-│       ▲                                                          │
-│       │ (only after user confirms)                               │
-└───────┼─────────────────────────────────────────────────────────┘
+│  ┌───────────┐    tool calls     ┌────────────┐                  │
+│  │  Router   │ ───────────────→  │  Executor  │                  │
+│  │  (LLM)    │ ←───────────────  │  (Tools)   │                  │
+│  └─────┬─────┘    tool output    └────────────┘                  │
+│        │                                                         │
+│        │ final text answer                                       │
+│        ▼                                                         │
+│  ┌───────────┐  fail (needs fix)                                 │
+│  │ Reflector │ ──────────────────┐                               │
+│  │ (Critic)  │                   │                               │
+│  └─────┬─────┘                   ▼                               │
+│        │ pass             (Back to Router)                       │
+│        ▼                                                         │
+│  ┌───────────┐                   ┌──────────────┐                │
+│  │ Committer │ ────────────────→ │ Respond Node │                │
+│  │ (CalSync) │  committed events │ (Structured) │                │
+│  └───────────┘                   └──────────────┘                │
+└─────────────────────────────────────────┼────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -106,15 +112,32 @@
 
 ### 4. Agent Layer (`src/agents/`)
 
-**Responsibility**: Unified multi-provider routing, multi-step tool execution loop, and conversational memory.
+**Responsibility**: Unified multi-provider routing, LangGraph state machine execution, adversarial quality validation, conflict resolution, and conversational memory.
 
+- **`graph.py`**:
+  - Compiled **LangGraph StateGraph** managing conversational and tool state.
+  - **Nodes**:
+    - `router_node`: calls `llm_router.invoke_agent` with history and tools; routes to `executor` on tool calls or `reflector` on final response.
+    - `executor_node`: executes tools (`view_schedule`, `parse_timetable_image`, `add_calendar_event`, etc.) and captures extracted events.
+    - `reflector_node`: adversarial quality gate evaluating answers against the image and deterministic checks; auto-fixes minor defects in place or triggers a re-extraction loop.
+    - `commit_node`: creates events in Google Calendar and performs conflict checks.
+    - `respond_node`: enforces clean, date-by-date structured output with universal emojis and appends conflict warnings at the very end.
+- **`reflector.py`**:
+  - Adversarial critic running fast deterministic checks (date validity, time format, future limits) and LLM image re-examination.
+  - Verifies start and end times against physical image columns to prevent cross-column contamination.
+  - Auto-deduplicates identical slots and auto-repairs swapped start/end times in place.
+- **`conflict_resolver.py`**:
+  - Overlap detection comparing proposed events against each other and existing Google Calendar schedules.
+  - Normalizes event titles (`_clean_title`) to avoid false-positive conflicts with an event's own calendar copy.
+  - Excludes all-day informational notes from hourly class clash calculations.
+  - Formats bilingual warning notices appended at the end of schedule responses.
 - **`llm_router.py`**:
-  - Centralized LLM gateway managing cached LangChain model pools with automatic quota failover and cooldown tracking.
-  - Failover sequence: Google Gemini (`gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`) → Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
-  - Automatic image optimization: downscales large camera photos to 1024px JPEG (~100KB) to minimize network payload.
+  - Centralized gateway with model pooling, quota cooldowns, and automatic failover.
+  - Priority sequence: `Gemini 3.5 Flash Lite` (default primary) → `Gemini 3.5 Flash` → `Gemini 2.5 Flash` → `Gemini 2.5 Flash Lite` → Groq Cloud (`llama-3.3-70b-versatile`, `mixtral-8x7b-32768`).
+  - Extended 50s execution windows for multimodal vision requests with transient 45s cooldowns on timeout.
 - **`agent.py`**:
-  - Autonomous agent loop: executes multi-step tool calling (up to 8 iterations) when inspecting Drive directories, checking schedules, or adding events.
-  - Answers general study/academic questions and greetings directly in a single inference pass (~1.2s).
+  - Public interface (`process_message`) delegating directly to the compiled LangGraph graph.
+  - Injects comprehensive system prompt instructions and timezone context (`Africa/Cairo`).
 - **`memory.py`**:
   - Per-user conversation memory buffer keyed by sender JID, retaining previous turns so students can ask contextual follow-up questions.
 - **`tools.py`**:
@@ -122,7 +145,7 @@
     - `view_schedule`: query upcoming Google Calendar events.
     - `add_calendar_event`: schedule events with the student's verbatim WhatsApp message saved in the event description.
     - `delete_calendar_event`: keyword or bulk event deletion.
-    - `parse_timetable_image`: multimodal schedule and timetable OCR.
+    - `parse_timetable_image`: multimodal schedule and timetable OCR with automatic calendar queueing.
     - `list_drive_folder`: dynamically inspect any Drive folder, browse subjects, count lectures, and get direct links.
     - `search_drive`: search indexed Drive study materials by topic or filename.
 
@@ -164,6 +187,7 @@
   - Integration with Google Calendar API using non-blocking `asyncio.to_thread` execution.
   - `cache_discovery=False` to eliminate legacy oauth2client file cache warnings.
   - Syncs to a shared secondary calendar for multi-user access.
+  - **Time-Aware Deduplication**: Compares event start times so multiple classes or labs of the same subject on the same day are scheduled accurately without being skipped.
   - Automatically records the original student message or announcement verbatim in the event's description.
   - Color-coded events with automatic 1h & 15m reminders.
   - Intelligent deletion engine: supports bulk clearing (`delete all`), cross-language subject mapping, and LLM matching.
