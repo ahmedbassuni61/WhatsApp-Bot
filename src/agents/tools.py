@@ -25,6 +25,12 @@ _calendar_sync = None
 _llm_router = None
 _drive_client = None
 _current_image = None  # PIL Image for the current message (set per request)
+_last_deleted_events: list[dict] = []
+
+
+def get_last_deleted_events() -> list[dict]:
+    """Return the most recently deleted calendar events."""
+    return list(_last_deleted_events)
 
 
 def init_tools(
@@ -210,7 +216,11 @@ async def add_calendar_event(
                 f"🔔 Reminders set: 1 hr & 15 mins before."
             )
         logger.info("  → duplicate skipped: %s", title)
-        return f"ℹ️ *{title}* is already on your calendar for this date."
+        time_text = f" ({time_start})" if time_start else ""
+        return (
+            f"⚠️ *تنبيه: لم تتم إضافة الموعد*\n"
+            f"• الموعد *{title}*{time_text} في يوم {date} موجود بالفعل على تقويمك بنفس الوقت والمواصفات (Already Scheduled)."
+        )
     except Exception as e:
         logger.error("  ✗ add_calendar_event failed: %s", e)
         return f"⚠️ Failed to add event: {e}"
@@ -221,14 +231,17 @@ async def delete_calendar_event(query: str, date: Optional[str] = None) -> str:
     """Delete or cancel calendar events matching a keyword.
     Use when the student wants to remove, delete, or cancel events.  Use query='all' to delete everything."""
     logger.info("🔧 delete_calendar_event(query='%s', date='%s')", query, date)
+    global _last_deleted_events
     try:
         deleted = await _calendar_sync.delete_events(query=query, date_str=date)
+        _last_deleted_events = deleted or []
         if deleted:
-            logger.info("  → deleted %d events: %s", len(deleted), deleted)
-            return "🗑️ *Cancelled & Removed from Google Calendar:*\n* " + "\n* ".join(deleted)
+            logger.info("  → deleted %d events: %s", len(deleted), [d.get("summary", d) for d in deleted])
+            return _calendar_sync.format_deleted_schedule(deleted)
         logger.info("  → no events matched '%s'", query)
-        return f"🔍 No upcoming calendar events matched: *{query}*"
+        return f"🔍 لم يتم العثور على مواعيد مطابقة لـ: *{query}* في Google Calendar."
     except Exception as e:
+        _last_deleted_events = []
         logger.error("  ✗ delete_calendar_event failed: %s", e)
         return f"⚠️ Failed to delete event: {e}"
 

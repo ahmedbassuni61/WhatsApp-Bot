@@ -259,9 +259,10 @@ async def delete_schedule_event(req: DeleteEventRequest):
     try:
         deleted = await calendar_sync.delete_events(query=req.query, date_str=req.date)
         if deleted:
+            titles = [d.get("summary", str(d)) if isinstance(d, dict) else str(d) for d in deleted]
             return DeleteEventResponse(
-                deleted_events=deleted,
-                message=f"Successfully deleted {len(deleted)} event(s): {', '.join(deleted)}",
+                deleted_events=titles,
+                message=f"Successfully deleted {len(deleted)} event(s): {', '.join(titles)}",
             )
         return DeleteEventResponse(deleted_events=[], message=f"No upcoming events found matching '{req.query}'.")
     except Exception as e:

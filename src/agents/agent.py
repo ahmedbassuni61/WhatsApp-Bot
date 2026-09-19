@@ -206,6 +206,7 @@ async def _run_agent(text: str, image: Any | None, user_id: str = "") -> str:
         "reflection_count": 0,
         "pending_events": [],
         "committed_events": [],
+        "deleted_events": [],
         "conflicts": [],
         "reflection_verdict": "pass",
         "needs_reflection": False,

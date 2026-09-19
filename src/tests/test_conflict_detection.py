@@ -72,3 +72,88 @@ def test_same_name_different_times_not_overlapping():
     assert not _times_overlap(ev_1, ev_2)
     conflicts = detect_conflicts([ev_1, ev_2], [])
     assert len(conflicts) == 0
+
+
+def test_are_same_specifications():
+    from src.agents.conflict_resolver import are_same_specifications
+
+    # Identical specs
+    ev_1 = {"title": "[LECTURE] Math 101", "location": "Hall 1", "event_type": "lecture"}
+    ev_2 = {"title": "محاضرة Math 101", "location": "Hall 1", "event_type": "lecture"}
+    assert are_same_specifications(ev_1, ev_2)
+
+    # Different event types (lecture vs lab)
+    ev_3 = {"title": "[LAB] Math 101", "location": "Hall 1", "event_type": "lab"}
+    assert not are_same_specifications(ev_1, ev_3)
+
+    # Different locations
+    ev_4 = {"title": "[LECTURE] Math 101", "location": "Hall 2", "event_type": "lecture"}
+    assert not are_same_specifications(ev_1, ev_4)
+
+    # Different subjects
+    ev_5 = {"title": "[LECTURE] Physics 101", "location": "Hall 1", "event_type": "lecture"}
+    assert not are_same_specifications(ev_1, ev_5)
+
+
+def test_conflict_same_time_different_specifications():
+    """If conflict at same time but different specs -> added, user warned."""
+    new_ev = [{"title": "[LAB] EEC 461", "date": "2026-09-21", "time_start": "10:00", "time_end": "11:00", "event_type": "lab"}]
+    existing_ev = [{"title": "[LECTURE] EEC 471", "start": "2026-09-21T10:00:00", "end": "2026-09-21T11:00:00", "event_type": "lecture"}]
+
+    conflicts = detect_conflicts(new_ev, existing_ev)
+    assert len(conflicts) == 1
+    assert conflicts[0]["conflict_type"] == "different_specs"
+    assert conflicts[0]["action"] == "add"
+
+    warning = format_conflict_warnings(conflicts)
+    assert "تعارض في المواعيد" in warning
+    assert "EEC 461" in warning
+    assert "EEC 471" in warning
+
+
+def test_conflict_same_time_same_specifications():
+    """If conflict at same time with same specs -> skipped, user warned."""
+    new_ev = [{"title": "[LECTURE] EEC 471", "date": "2026-09-21", "time_start": "10:00", "time_end": "11:00", "location": "Hall 3", "event_type": "lecture"}]
+    existing_ev = [{"title": "[LECTURE] EEC 471", "start": "2026-09-21T10:00:00", "end": "2026-09-21T11:00:00", "location": "Hall 3", "event_type": "lecture"}]
+
+    conflicts = detect_conflicts(new_ev, existing_ev)
+    assert len(conflicts) == 1
+    assert conflicts[0]["conflict_type"] == "same_specs"
+    assert conflicts[0]["action"] == "skip"
+
+    warning = format_conflict_warnings(conflicts)
+    assert "تم تخطي" in warning
+    assert "EEC 471" in warning
+    assert "نفس المواصفات" in warning
+
+
+def test_format_deleted_schedule():
+    from src.whatsapp.calendar_sync import CalendarSync
+    cal = CalendarSync(credentials_path="./dummy", token_path="./dummy")
+
+    deleted = [
+        {
+            "title": "معمل الدوائر المتكاملة الرقمية EEC 431",
+            "summary": "[LAB] معمل الدوائر المتكاملة الرقمية EEC 431",
+            "date": "2026-09-19",
+            "time_start": "11:30",
+            "time_end": "12:30",
+            "location": "معمل 4",
+            "event_type": "lab",
+        },
+        {
+            "title": "محاضرة نظم التحكم الآلي EEC 471",
+            "summary": "[LECTURE] محاضرة نظم التحكم الآلي EEC 471",
+            "date": "2026-09-19",
+            "time_start": "12:30",
+            "time_end": "13:30",
+            "location": "مدرج 3",
+            "event_type": "lecture",
+        },
+    ]
+
+    msg = cal.format_deleted_schedule(deleted)
+    assert "🗑️ *تم حذف 2 مواعيد من Google Calendar بنجاح*:" in msg
+    assert "السبت (Saturday), Sep 19" in msg
+    assert "🔬 [LAB] *معمل الدوائر المتكاملة الرقمية EEC 431* — 🕐 11:30 → 12:30 | 📍 معمل 4" in msg
+    assert "📚 [LECTURE] *محاضرة نظم التحكم الآلي EEC 471* — 🕐 12:30 → 13:30 | 📍 مدرج 3" in msg

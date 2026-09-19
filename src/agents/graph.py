@@ -67,6 +67,7 @@ class AgentState(TypedDict):
     reflection_count: int            # reflection retries (safety cap 5)
     pending_events: list[dict]       # extracted events NOT yet committed
     committed_events: list[dict]     # events after commit (with calendar IDs)
+    deleted_events: list[dict]       # deleted events
     conflicts: list[dict]            # detected overlaps
     reflection_verdict: str          # "pass" | "fail"
     needs_reflection: bool           # set by executor when calendar/timetable tools ran
@@ -207,6 +208,7 @@ async def executor_node(state: AgentState) -> dict:
     executed_results: list[str] = []
     pending_events: list[dict] = list(state.get("pending_events") or [])
     needs_reflection = state.get("needs_reflection", False)
+    deleted_events = list(state.get("deleted_events") or [])
 
     for i, tc in enumerate(tool_calls, 1):
         name = tc["name"]
@@ -262,12 +264,24 @@ async def executor_node(state: AgentState) -> dict:
                     })
                     logger.info("│ 📋 Captured add_calendar_event '%s' into pending_events", args["title"])
 
+        # Capture deleted events when calendar deletion is invoked
+        if name == "delete_calendar_event":
+            try:
+                from src.agents.tools import get_last_deleted_events
+                last_del = get_last_deleted_events()
+                if last_del:
+                    deleted_events.extend(last_del)
+                    logger.info("│ 🗑️ Captured %d deleted events into state", len(last_del))
+            except Exception as ex:
+                logger.warning("│ Could not retrieve last deleted events: %s", ex)
+
         executed_results.append(res_str)
         new_messages.append(ToolMessage(content=res_str, tool_call_id=call_id))
 
     return {
         "messages": new_messages,
         "pending_events": pending_events,
+        "deleted_events": deleted_events,
         "needs_reflection": needs_reflection,
     }
 
@@ -374,8 +388,9 @@ async def reflector_node(state: AgentState) -> dict:
 async def commit_node(state: AgentState) -> dict:
     """Commit pending events to Google Calendar and detect conflicts.
 
-    Only runs when reflection has passed.  Creates ALL events even if
-    conflicts are detected — conflicts produce warnings, not blocks.
+    Only runs when reflection has passed.
+    - If conflict in same time AND same specifications: do NOT add it, warn user.
+    - If conflict in same time BUT different specifications: ADD it, warn user.
     """
     pending = state.get("pending_events") or []
     if not pending:
@@ -397,7 +412,6 @@ async def commit_node(state: AgentState) -> dict:
     # Fetch existing events for conflict detection
     existing_events = []
     try:
-        # Get events for the date range covered by pending events
         dates = [ev.get("date") for ev in pending if ev.get("date")]
         if dates:
             min_date = min(dates)
@@ -409,12 +423,13 @@ async def commit_node(state: AgentState) -> dict:
     except Exception as e:
         logger.warning("│ Could not fetch existing events for conflict check: %s", e)
 
-    # Detect conflicts (new vs existing + new vs new)
+    # Detect conflicts (categorizes into same_specs and different_specs)
     conflicts = detect_conflicts(pending, existing_events)
     if conflicts:
         logger.info("│ ⚠️ %d conflict(s) detected", len(conflicts))
 
-    # Create all events regardless of conflicts
+    from src.agents.conflict_resolver import are_same_specifications
+
     committed = []
     for ev in pending:
         # If the event was already created during an add_calendar_event call, preserve it
@@ -427,20 +442,43 @@ async def commit_node(state: AgentState) -> dict:
                 deleted = await cal_sync.delete_events(
                     query=ev.get("title", ""), date_str=ev.get("date")
                 )
-                committed.append({**ev, "_action_result": "deleted", "_deleted": deleted})
+                if deleted:
+                    for d in deleted:
+                        committed.append({**d, "_action_result": "deleted"})
+                else:
+                    committed.append({**ev, "_action_result": "deleted_none"})
             except Exception as e:
                 logger.error("│ Failed to delete event '%s': %s", ev.get("title"), e)
                 committed.append({**ev, "_action_result": "error", "_error": str(e)})
-        else:
-            try:
-                created = await cal_sync.create_event(ev)
-                if created:
-                    committed.append({**ev, "_action_result": "created", "_calendar_id": created.get("id")})
-                else:
-                    committed.append({**ev, "_action_result": "duplicate"})
-            except Exception as e:
-                logger.error("│ Failed to create event '%s': %s", ev.get("title"), e)
-                committed.append({**ev, "_action_result": "error", "_error": str(e)})
+            continue
+
+        # Rule 1: If conflict with SAME time and SAME specifications -> DO NOT ADD IT, WARN USER
+        ev_title = ev.get("title") or ev.get("summary") or ""
+        ev_date = ev.get("date")
+        ev_start = ev.get("time_start")
+
+        is_same_spec_duplicate = any(
+            c.get("conflict_type") == "same_specs" and
+            c.get("date") == ev_date and
+            are_same_specifications(ev, {"title": c.get("event_a"), "summary": c.get("event_a")})
+            for c in conflicts
+        )
+
+        if is_same_spec_duplicate:
+            logger.info("│ ⚠️ Skipping '%s' on %s (%s) — same time & specifications already exist", ev_title, ev_date, ev_start)
+            committed.append({**ev, "_action_result": "skipped_duplicate_spec"})
+            continue
+
+        # Rule 2: If conflict with SAME time but DIFFERENT specifications (or no conflict) -> ADD IT, WARN USER
+        try:
+            created = await cal_sync.create_event(ev)
+            if created:
+                committed.append({**ev, "_action_result": "created", "_calendar_id": created.get("id")})
+            else:
+                committed.append({**ev, "_action_result": "skipped_duplicate_spec"})
+        except Exception as e:
+            logger.error("│ Failed to create event '%s': %s", ev.get("title"), e)
+            committed.append({**ev, "_action_result": "error", "_error": str(e)})
 
     logger.info("│ ✅ Committed %d events (%d conflicts)", len(committed), len(conflicts))
 
@@ -453,54 +491,66 @@ async def commit_node(state: AgentState) -> dict:
 async def respond_node(state: AgentState) -> dict:
     """Format the final structured response for the user.
 
-    If events were processed (created or existing duplicates): ENFORCES a clean,
+    If events were processed (created, duplicates, or deleted): ENFORCES a clean,
     grouped-by-date summary with emoji type indicators, times, and conflict warnings.
 
     If no events: passes through the LLM's text response unchanged.
     """
     committed = state.get("committed_events") or state.get("pending_events") or []
     conflicts = state.get("conflicts") or []
+    deleted_from_state = state.get("deleted_events") or []
     base_response = state.get("final_response", "")
 
-    # No events processed at all — return the LLM's text response as-is
-    if not committed:
+    # Separate created, deleted, duplicates, errors
+    created = [ev for ev in committed if ev.get("_action_result") == "created"]
+    deleted_from_committed = [ev for ev in committed if ev.get("_action_result") == "deleted"]
+    duplicates = [ev for ev in committed if ev.get("_action_result") in ("duplicate", "skipped_duplicate_spec")]
+    errors = [ev for ev in committed if ev.get("_action_result") == "error"]
+
+    # Deduplicate deleted events from committed and state
+    all_deleted = deleted_from_committed + deleted_from_state
+    seen_del = set()
+    deleted = []
+    for d in all_deleted:
+        sig = (d.get("title") or d.get("summary"), d.get("date"), d.get("time_start"))
+        if sig not in seen_del:
+            seen_del.add(sig)
+            deleted.append(d)
+
+    active_events = created + duplicates
+
+    # No events added or deleted — return LLM's text response as-is
+    if not active_events and not deleted and not errors:
         if base_response:
             return {"final_response": base_response}
         return {"final_response": "I completed the requested actions. 📚"}
 
-    # Separate created, deleted, duplicates, errors
-    created = [ev for ev in committed if ev.get("_action_result") == "created"]
-    deleted = [ev for ev in committed if ev.get("_action_result") == "deleted"]
-    duplicates = [ev for ev in committed if ev.get("_action_result") == "duplicate"]
-    errors = [ev for ev in committed if ev.get("_action_result") == "error"]
-
-    active_events = created + duplicates
     lines: list[str] = []
 
-    # ENFORCE structured date-by-date output whenever active events exist
+    day_names_map = {
+        "Saturday": "السبت (Saturday)",
+        "Sunday": "الأحد (Sunday)",
+        "Monday": "الإثنين (Monday)",
+        "Tuesday": "الثلاثاء (Tuesday)",
+        "Wednesday": "الأربعاء (Wednesday)",
+        "Thursday": "الخميس (Thursday)",
+        "Friday": "الجمعة (Friday)",
+    }
+
+    # 1. ENFORCE structured date-by-date output for ADDED / ACTIVE events
     if active_events:
         if created and duplicates:
-            lines.append(f"📅 *تم مزامنة الجدول مع Google Calendar* (تمت إضافة {len(created)} موعد جديد، و{len(duplicates)} مضاف مسبقاً):\n")
+            lines.append(f"📅 *تم مزامنة الجدول مع Google Calendar* (تمت إضافة {len(created)} موعد جديد، و{len(duplicates)} مسجل مسبقاً):\n")
         elif created:
             lines.append(f"📅 *تمت إضافة {len(created)} موعد إلى Google Calendar بنجاح*:\n")
         else:
-            lines.append(f"📅 *جدولك الحالي المسجل على Google Calendar* ({len(duplicates)} موعد):\n")
+            lines.append(f"📅 *جدولك المسجل على Google Calendar* ({len(duplicates)} موعد):\n")
 
         # Group by date
         by_date: dict[str, list[dict]] = {}
         for ev in active_events:
             d = ev.get("date", "Unknown")
             by_date.setdefault(d, []).append(ev)
-
-        day_names_map = {
-            "Saturday": "السبت (Saturday)",
-            "Sunday": "الأحد (Sunday)",
-            "Monday": "الإثنين (Monday)",
-            "Tuesday": "الثلاثاء (Tuesday)",
-            "Wednesday": "الأربعاء (Wednesday)",
-            "Thursday": "الخميس (Thursday)",
-            "Friday": "الجمعة (Friday)",
-        }
 
         for date_str in sorted(by_date.keys()):
             try:
@@ -512,11 +562,10 @@ async def respond_node(state: AgentState) -> dict:
                 formatted_date = date_str
 
             lines.append(f"📅 *{formatted_date}*")
-            # Sort chronologically by start time
             day_events = sorted(by_date[date_str], key=lambda x: x.get("time_start") or "00:00")
             for ev in day_events:
                 etype = ev.get("event_type", "other")
-                emoji = EVENT_TYPE_EMOJI.get(etype, "⚪")
+                emoji = EVENT_TYPE_EMOJI.get(etype, "📌")
                 tag = f"[{etype.upper()}]"
                 title = ev.get("title", "Untitled")
 
@@ -535,18 +584,56 @@ async def respond_node(state: AgentState) -> dict:
                 lines.append(f"  • {emoji} {tag} *{title}* — 🕐 {time_str}{loc_str}")
             lines.append("")  # blank line between date groups
 
+        lines.append("🔔 تم ضبط التنبيهات تلقائياً: قبل الموعد بساعة و15 دقيقة.\n")
+
+    # 2. ENFORCE structured date-by-date output for DELETED events
     if deleted:
-        del_names = [ev.get("title", "Untitled") for ev in deleted]
-        lines.append(f"🗑️ تم الإلغاء: {', '.join(del_names)}\n")
+        count = len(deleted)
+        header = f"🗑️ *تم حذف {count} مواعيد من Google Calendar بنجاح*:\n" if count > 1 else "🗑️ *تم حذف موعد واحد من Google Calendar بنجاح*:\n"
+        lines.append(header)
+
+        by_date_del: dict[str, list[dict]] = {}
+        for ev in deleted:
+            d = ev.get("date", "Unknown")
+            by_date_del.setdefault(d, []).append(ev)
+
+        for date_str in sorted(by_date_del.keys()):
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                eng_day = dt.strftime("%A")
+                day_display = day_names_map.get(eng_day, eng_day)
+                formatted_date = f"{day_display}, {dt.strftime('%b %d')}"
+            except (ValueError, TypeError):
+                formatted_date = date_str
+
+            lines.append(f"📅 *{formatted_date}*")
+            day_events = sorted(by_date_del[date_str], key=lambda x: x.get("time_start") or "00:00")
+            for ev in day_events:
+                etype = ev.get("event_type", "event")
+                emoji = EVENT_TYPE_EMOJI.get(etype, "📌")
+                tag = f"[{etype.upper()}]"
+                title = ev.get("title") or ev.get("summary") or "Untitled"
+
+                ts = ev.get("time_start")
+                te = ev.get("time_end")
+                if ts and te:
+                    time_str = f"{ts} → {te}"
+                elif ts:
+                    time_str = f"{ts}"
+                else:
+                    time_str = "All Day"
+
+                loc = ev.get("location")
+                loc_str = f" | 📍 {loc}" if loc else ""
+
+                lines.append(f"  • {emoji} {tag} *{title}* — 🕐 {time_str}{loc_str}")
+            lines.append("")  # blank line between date groups
 
     if errors:
         err_names = [f"{ev.get('title', 'Untitled')} ({ev.get('_error', '?')})" for ev in errors]
         lines.append(f"⚠️ تعذر الحفظ: {', '.join(err_names)}\n")
 
-    if active_events:
-        lines.append("🔔 تم ضبط التنبيهات تلقائياً: قبل الموعد بساعة و15 دقيقة.")
-
-    # Place conflict warnings at the very end of addition if found
+    # 3. Place conflict warnings at the very end if found
     conflict_text = format_conflict_warnings(conflicts)
     if conflict_text:
         lines.append(conflict_text)

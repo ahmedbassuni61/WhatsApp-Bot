@@ -155,9 +155,9 @@ class CalendarSync:
             logger.warning("Event '%s' has no date, skipping", title)
             return None
 
-        # Check for duplicates before creating
-        if await self._is_duplicate(title, date_str, time_start):
-            logger.info("Duplicate event detected, skipping: %s on %s", title, date_str)
+        # Check for duplicates before creating (requires matching date, time, and specifications)
+        if await self._is_duplicate(title, date_str, time_start, event_type=event_type, location=location):
+            logger.info("Duplicate event detected with matching specifications, skipping: %s on %s", title, date_str)
             return None
 
         # Create the event
@@ -258,8 +258,15 @@ class CalendarSync:
 
         return "\n\n".join(lines)
 
-    async def _is_duplicate(self, title: str, date_str: str | None, time_start: str | None) -> bool:
-        """Check if a similar event already exists on the same date at the same time."""
+    async def _is_duplicate(
+        self,
+        title: str,
+        date_str: str | None,
+        time_start: str | None,
+        event_type: str = "other",
+        location: str = "",
+    ) -> bool:
+        """Check if an event already exists with the same date, time, and specifications."""
         if not date_str:
             return False
 
@@ -268,7 +275,17 @@ class CalendarSync:
         time_min = f"{date_str}T00:00:00Z"
         time_max = f"{date_str}T23:59:59Z"
 
+        new_ev = {
+            "title": title,
+            "date": date_str,
+            "time_start": time_start,
+            "event_type": event_type,
+            "location": location,
+        }
+
         try:
+            from src.agents.conflict_resolver import are_same_specifications
+
             result = await asyncio.to_thread(
                 service.events().list(
                     calendarId=self.calendar_id,
@@ -281,33 +298,43 @@ class CalendarSync:
 
             existing = result.get("items", [])
             for e in existing:
-                summary = e.get("summary", "").lower()
-                title_lower = title.lower()
-                if title_lower in summary or summary in title_lower:
-                    e_start = e.get("start", {})
-                    e_dt_str = e_start.get("dateTime")
+                e_summary = e.get("summary", "")
+                e_loc = e.get("location", "")
+                e_ev = {"title": e_summary, "summary": e_summary, "location": e_loc}
 
-                    # If both have time_start, only duplicate if times match
-                    # If two tasks with similar names have different times on the same day, they are NOT duplicates
-                    if time_start and e_dt_str:
-                        try:
-                            dt = datetime.fromisoformat(e_dt_str)
-                            if dt.strftime("%H:%M") == time_start:
-                                return True
-                            continue
-                        except Exception:
-                            pass
-                    elif not time_start and e_start.get("date"):
-                        # Both are all-day events with the same title
-                        return True
+                # If specifications differ (e.g. [LAB] vs [LECTURE], or different hall), it is NOT a duplicate
+                if not are_same_specifications(new_ev, e_ev):
+                    continue
+
+                e_start = e.get("start", {})
+                e_dt_str = e_start.get("dateTime")
+
+                # If both have time_start, only duplicate if times match
+                # If two tasks have different times on the same day, they are NOT duplicates
+                if time_start and e_dt_str:
+                    try:
+                        dt = datetime.fromisoformat(e_dt_str)
+                        if dt.strftime("%H:%M") == time_start:
+                            return True
+                        continue
+                    except Exception:
+                        pass
+                elif not time_start and e_start.get("date"):
+                    # Both are all-day events with the same specifications
+                    return True
 
             return False
 
         except Exception:
             return False  # On error, allow creation
 
-    async def delete_events(self, query: str = "", date_str: str | None = None) -> list[str]:
-        """Delete Google Calendar events matching the query keyword, or 'all' for bulk deletion."""
+    async def delete_events(self, query: str = "", date_str: str | None = None) -> list[dict]:
+        """Delete Google Calendar events matching query keyword, or 'all' for bulk deletion.
+
+        Returns a list of dicts with full details of deleted events:
+        [{'title': ..., 'summary': ..., 'date': ..., 'time_start': ..., 'time_end': ..., 'location': ..., 'event_type': ...}]
+        """
+        import re
         service = self._get_service()
         deleted = []
 
@@ -344,6 +371,57 @@ class CalendarSync:
             for item in matched_items:
                 summary = item.get("summary", "Untitled")
                 event_id = item.get("id")
+                start = item.get("start", {})
+                end = item.get("end", {})
+                location = item.get("location", "")
+
+                ev_date = None
+                time_start = None
+                time_end = None
+
+                start_dt_str = start.get("dateTime")
+                if start_dt_str:
+                    try:
+                        dt = datetime.fromisoformat(start_dt_str)
+                        ev_date = dt.strftime("%Y-%m-%d")
+                        time_start = dt.strftime("%H:%M")
+                    except Exception:
+                        pass
+                elif start.get("date"):
+                    ev_date = start["date"]
+
+                end_dt_str = end.get("dateTime")
+                if end_dt_str:
+                    try:
+                        dt = datetime.fromisoformat(end_dt_str)
+                        time_end = dt.strftime("%H:%M")
+                    except Exception:
+                        pass
+
+                # Extract event type from summary tag like [LECTURE], [EXAM], [LAB], etc.
+                event_type = "event"
+                clean_title = summary
+                tag_match = re.match(r"^\[([A-Za-z_]+)\]\s*(.*)", summary)
+                if tag_match:
+                    event_type = tag_match.group(1).lower()
+                    clean_title = tag_match.group(2).strip()
+                else:
+                    for kw, et in [("محاضرة", "lecture"), ("معمل", "lab"), ("سكشن", "section"), ("امتحان", "exam"), ("تسليم", "deadline")]:
+                        if kw in summary:
+                            event_type = et
+                            break
+
+                event_dict = {
+                    "title": clean_title,
+                    "summary": summary,
+                    "date": ev_date,
+                    "time_start": time_start,
+                    "time_end": time_end,
+                    "location": location,
+                    "event_type": event_type,
+                    "id": event_id,
+                }
+
                 try:
                     await asyncio.to_thread(
                         service.events().delete(
@@ -351,8 +429,8 @@ class CalendarSync:
                             eventId=event_id,
                         ).execute
                     )
-                    deleted.append(summary)
-                    logger.info("Deleted calendar event: '%s' (ID: %s)", summary, event_id)
+                    deleted.append(event_dict)
+                    logger.info("Deleted calendar event: '%s' on %s (ID: %s)", summary, ev_date, event_id)
                 except Exception as del_err:
                     logger.error("Failed to delete event %s: %s", event_id, del_err)
 
@@ -360,3 +438,75 @@ class CalendarSync:
             logger.error("Error finding events to delete for query '%s': %s", query, e)
 
         return deleted
+
+    def format_deleted_schedule(self, deleted_events: list[dict]) -> str:
+        """Format deleted events into a structured WhatsApp message similar to addition."""
+        if not deleted_events:
+            return "🔍 لم يتم العثور على مواعيد مطابقة للحذف في تقويم Google Calendar."
+
+        emoji_map = {
+            "exam": "📝",
+            "lab": "🔬",
+            "lecture": "📚",
+            "section": "👥",
+            "deadline": "⏰",
+            "office_hours": "💬",
+            "event": "📌",
+            "other": "📌",
+        }
+
+        count = len(deleted_events)
+        if count == 1:
+            header = "🗑️ *تم حذف موعد واحد من Google Calendar بنجاح*:\n"
+        else:
+            header = f"🗑️ *تم حذف {count} مواعيد من Google Calendar بنجاح*:\n"
+
+        by_date: dict[str, list[dict]] = {}
+        for ev in deleted_events:
+            d = ev.get("date") or "Unknown"
+            by_date.setdefault(d, []).append(ev)
+
+        day_names_map = {
+            "Saturday": "السبت (Saturday)",
+            "Sunday": "الأحد (Sunday)",
+            "Monday": "الإثنين (Monday)",
+            "Tuesday": "الثلاثاء (Tuesday)",
+            "Wednesday": "الأربعاء (Wednesday)",
+            "Thursday": "الخميس (Thursday)",
+            "Friday": "الجمعة (Friday)",
+        }
+
+        lines = [header]
+        for date_str in sorted(by_date.keys()):
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                eng_day = dt.strftime("%A")
+                day_display = day_names_map.get(eng_day, eng_day)
+                formatted_date = f"{day_display}, {dt.strftime('%b %d')}"
+            except (ValueError, TypeError):
+                formatted_date = date_str
+
+            lines.append(f"📅 *{formatted_date}*")
+            day_events = sorted(by_date[date_str], key=lambda x: x.get("time_start") or "00:00")
+            for ev in day_events:
+                etype = ev.get("event_type", "event")
+                emoji = emoji_map.get(etype, "📌")
+                tag = f"[{etype.upper()}]"
+                title = ev.get("title") or ev.get("summary") or "Untitled"
+
+                ts = ev.get("time_start")
+                te = ev.get("time_end")
+                if ts and te:
+                    time_str = f"{ts} → {te}"
+                elif ts:
+                    time_str = f"{ts}"
+                else:
+                    time_str = "All Day"
+
+                loc = ev.get("location")
+                loc_str = f" | 📍 {loc}" if loc else ""
+
+                lines.append(f"  • {emoji} {tag} *{title}* — 🕐 {time_str}{loc_str}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
